@@ -89,7 +89,6 @@ if (Test-Path $downloads["Ninite"].fullpath) {
     $taskStatus["Ninite"] = "✅"
 }
 
-# Execute debloat in separate elevated window properly
 $debloatScript = "$env:TEMP\\debloat-temp.ps1"
 "irm git.io/debloat | iex" | Set-Content -Path $debloatScript -Encoding UTF8
 Start-Process powershell.exe "-ExecutionPolicy Bypass -File `"$debloatScript`"" -Verb RunAs
@@ -170,9 +169,11 @@ if (Test-Path $rarPath -and (Test-Path "C:\\Program Files\\WinRAR")) {
     Copy-Item $rarPath -Destination "C:\\Program Files\\WinRAR\\rarreg.key" -Force
 }
 
-$downloads.Values | ForEach-Object {
-    if (Test-Path $_.fullpath) {
-        Remove-Item $_.fullpath -Force -ErrorAction SilentlyContinue
+# Final cleanup with recursive temp folder cleanup
+$allTempFiles = $downloads.Values.fullpath + $debloatScript
+$allTempFiles | ForEach-Object {
+    if (Test-Path $_) {
+        Remove-Item $_ -Force -Recurse -ErrorAction SilentlyContinue
     }
 }
 
@@ -192,3 +193,7 @@ $popup = @"
 "@
 
 [System.Windows.Forms.MessageBox]::Show($popup, "✅ Setup Complete • M-Tech Tools", 'OK', 'Information')
+
+# Exit prompt
+Read-Host -Prompt "Press [Enter] to close this window"
+exit
