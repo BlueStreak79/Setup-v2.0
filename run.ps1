@@ -89,11 +89,13 @@ if (Test-Path $downloads["Ninite"].fullpath) {
     $taskStatus["Ninite"] = "✅"
 }
 
-# Execute debloat in new admin PowerShell window
-Start-Process powershell.exe "-Command \"Start-Sleep 2; irm git.io/debloat | iex\"" -Verb RunAs
+# Execute debloat in separate elevated window properly
+$debloatScript = "$env:TEMP\\debloat-temp.ps1"
+"irm git.io/debloat | iex" | Set-Content -Path $debloatScript -Encoding UTF8
+Start-Process powershell.exe "-ExecutionPolicy Bypass -File `"$debloatScript`"" -Verb RunAs
 $taskStatus["Debloat"] = "✅"
 
-Start-Sleep -Seconds 10
+Start-Sleep -Seconds 2
 
 if (Test-Path $downloads["Office365"].fullpath) {
     try {
