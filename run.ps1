@@ -1,84 +1,111 @@
 Add-Type -AssemblyName System.Windows.Forms
 
-# ----------------- SETUP -----------------
 function Ensure-Admin {
     if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
-        Start-Process powershell.exe "-ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
+        Start-Process powershell.exe "-ExecutionPolicy Bypass -File `$PSCommandPath" -Verb RunAs
         exit
     }
 }
+
 function Ensure-ExecutionPolicy {
     if ((Get-ExecutionPolicy) -notin @("Bypass", "Unrestricted")) {
         Set-ExecutionPolicy Bypass -Scope Process -Force
     }
 }
+
 function Download-FileSafe {
-    param($url, $out)
+    param(
+        [string]$url,
+        [string]$out,
+        [int]$timeout = 15
+    )
     try {
-        Invoke-WebRequest -Uri $url -OutFile $out -UseBasicParsing -ErrorAction Stop
+        Write-Host "⬇️  Downloading $url..." -ForegroundColor Cyan
+        Invoke-WebRequest -Uri $url -OutFile $out -TimeoutSec $timeout -UseBasicParsing -ErrorAction Stop
         return $true
     } catch {
+        Write-Host "Retrying download after failure: $url" -ForegroundColor Yellow
         Start-Sleep 2
-        try { Invoke-WebRequest -Uri $url -OutFile $out -UseBasicParsing -ErrorAction Stop } catch { return $false }
+        try {
+            Invoke-WebRequest -Uri $url -OutFile $out -TimeoutSec $timeout -UseBasicParsing -ErrorAction Stop
+            return $true
+        } catch {
+            Write-Host "❌ Failed to download $url" -ForegroundColor Red
+            return $false
+        }
     }
 }
-function Run-InBackground { param([ScriptBlock]$code); Start-Job -ScriptBlock $code }
+
+function Show-ProgressBar {
+    param (
+        [string]$Title = "Progress",
+        [string]$Message = "Working...",
+        [int]$Duration = 3000
+    )
+    $form = New-Object Windows.Forms.Form
+    $form.Text = $Title
+    $form.Width = 400
+    $form.Height = 100
+    $form.StartPosition = "CenterScreen"
+
+    $label = New-Object Windows.Forms.Label
+    $label.Text = $Message
+    $label.Width = 360
+    $label.Left = 10
+    $label.Top = 20
+    $form.Controls.Add($label)
+
+    $form.Show()
+    Start-Sleep -Milliseconds $Duration
+    $form.Close()
+}
 
 Ensure-Admin
 Ensure-ExecutionPolicy
 
-# ----------------- DOWNLOAD FILES -----------------
 $temp = [System.IO.Path]::GetTempPath()
 $downloads = @{
     Ninite    = @{ url = "https://github.com/BlueStreak79/Setup/raw/main/Ninite.exe";  file = "Ninite.exe" }
     Office365 = @{ url = "https://github.com/BlueStreak79/Setup/raw/main/365.exe";     file = "365.exe" }
     RARKey    = @{ url = "https://github.com/BlueStreak79/Setup/raw/main/rarreg.key";  file = "rarreg.key" }
 }
+
 foreach ($k in $downloads.Keys) {
     $path = Join-Path $temp $downloads[$k].file
     $downloads[$k].fullpath = $path
     $downloads[$k].status = if (Download-FileSafe -url $downloads[$k].url -out $path) { "✅" } else { "❌" }
 }
 
-# ----------------- TASK TRACKING -----------------
+Show-ProgressBar -Title "Setup" -Message "Downloads completed. Executing setup..." -Duration 1500
+
 $taskStatus = @{
     Ninite = "❌"; Office = "❌"; Debloat = "❌"
     WinActivate = "❌"; WinMethod = "-"; WinEdition = "-"
     OfficeActivated = "❌"
 }
 
-# ----------------- NINITE -----------------
-$niniteJob = $null
 if (Test-Path $downloads["Ninite"].fullpath) {
-    $niniteJob = Run-InBackground {
-        Start-Process $using:downloads["Ninite"].fullpath -Wait -ErrorAction SilentlyContinue
-    }
+    Start-Process $downloads["Ninite"].fullpath
+    $taskStatus["Ninite"] = "✅"
 }
 
-# ----------------- DEBLOAT (INLINE) -----------------
-try {
-    irm git.io/debloat | iex
-    $taskStatus["Debloat"] = "✅"
-} catch {
-    $taskStatus["Debloat"] = "❌"
-}
+# Execute debloat in new admin PowerShell window
+Start-Process powershell.exe "-Command \"Start-Sleep 2; irm git.io/debloat | iex\"" -Verb RunAs
+$taskStatus["Debloat"] = "✅"
 
-# ----------------- OFFICE + ACTIVATION -----------------
-$officeJob = $null
+Start-Sleep -Seconds 10
+
 if (Test-Path $downloads["Office365"].fullpath) {
-    $officeJob = Run-InBackground {
-        $result = @{ Installed = $false; Activated = $false }
-        try {
-            Start-Process $using:downloads["Office365"].fullpath -Wait -ErrorAction SilentlyContinue
-            $result.Installed = $true
-            irm bit.ly/act-off | iex
-            $result.Activated = $true
-        } catch {}
-        return $result
+    try {
+        Start-Process $downloads["Office365"].fullpath -Wait -ErrorAction SilentlyContinue
+        $taskStatus["Office"] = "✅"
+        irm bit.ly/act-off | iex
+        $taskStatus["OfficeActivated"] = "✅"
+    } catch {
+        $taskStatus["Office"] = "❌"
     }
 }
 
-# ----------------- WINDOWS ACTIVATION -----------------
 function Get-OEMKey { try { (Get-CimInstance -Query 'select * from SoftwareLicensingService').OA3xOriginalProductKey } catch { $null } }
 function Get-InstalledEdition { try { (Get-ComputerInfo).WindowsProductName } catch { $null } }
 function Is-WindowsActivated {
@@ -113,7 +140,6 @@ function Activate-WithFallback {
     return Is-WindowsActivated
 }
 
-# Run Activation
 $key = Get-OEMKey
 $taskStatus["WinEdition"] = Get-InstalledEdition
 if (Is-WindowsActivated) {
@@ -137,29 +163,17 @@ if ($taskStatus["WinActivate"] -ne "✅") {
     }
 }
 
-# ----------------- WAIT FOR BACKGROUND JOBS -----------------
-if ($niniteJob) { $niniteJob | Wait-Job | Receive-Job; $taskStatus["Ninite"] = "✅" }
-
-if ($officeJob) {
-    $result = $officeJob | Wait-Job | Receive-Job
-    $taskStatus["Office"] = if ($result.Installed) { "✅" } else { "❌" }
-    $taskStatus["OfficeActivated"] = if ($result.Activated) { "✅" } else { "❌" }
-}
-
-# ----------------- RAR KEY -----------------
 $rarPath = $downloads["RARKey"].fullpath
-if (Test-Path $rarPath -and (Test-Path "C:\Program Files\WinRAR")) {
-    Copy-Item $rarPath -Destination "C:\Program Files\WinRAR\rarreg.key" -Force
+if (Test-Path $rarPath -and (Test-Path "C:\\Program Files\\WinRAR")) {
+    Copy-Item $rarPath -Destination "C:\\Program Files\\WinRAR\\rarreg.key" -Force
 }
 
-# ----------------- CLEANUP -----------------
 $downloads.Values | ForEach-Object {
     if (Test-Path $_.fullpath) {
         Remove-Item $_.fullpath -Force -ErrorAction SilentlyContinue
     }
 }
 
-# ----------------- FINAL POPUP -----------------
 $popup = @"
 🛠️  M-Tech Full Setup Summary
 
