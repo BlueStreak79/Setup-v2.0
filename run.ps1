@@ -177,7 +177,9 @@ $allTempFiles | ForEach-Object {
     }
 }
 
-$popup = @"
+Start-Sleep -Milliseconds 500
+[System.Windows.Forms.Application]::EnableVisualStyles()
+[System.Windows.Forms.MessageBox]::Show(@"
 🛠️  M-Tech Full Setup Summary
 
 📦 Ninite Install       : $($taskStatus["Ninite"])
@@ -190,9 +192,7 @@ $popup = @"
 
 ——————————————
        — BLUE :-)
-"@
-
-[System.Windows.Forms.MessageBox]::Show($popup, "✅ Setup Complete • M-Tech Tools", 'OK', 'Information')
+"@, "✅ Setup Complete • M-Tech Tools", 'OK', 'Information')
 
 # Exit prompt
 Read-Host -Prompt "Press [Enter] to close this window"
