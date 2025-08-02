@@ -1,6 +1,6 @@
 Add-Type -AssemblyName System.Windows.Forms
 
-# Ensure Admin & Execution Policy
+# ----------------- SETUP -----------------
 function Ensure-Admin {
     if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
         Start-Process powershell.exe "-ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
@@ -27,7 +27,7 @@ function Run-InBackground { param([ScriptBlock]$code); Start-Job -ScriptBlock $c
 Ensure-Admin
 Ensure-ExecutionPolicy
 
-# Downloads
+# ----------------- DOWNLOAD FILES -----------------
 $temp = [System.IO.Path]::GetTempPath()
 $downloads = @{
     Ninite    = @{ url = "https://github.com/BlueStreak79/Setup/raw/main/Ninite.exe";  file = "Ninite.exe" }
@@ -40,14 +40,14 @@ foreach ($k in $downloads.Keys) {
     $downloads[$k].status = if (Download-FileSafe -url $downloads[$k].url -out $path) { "✅" } else { "❌" }
 }
 
-# Track Task Status
+# ----------------- TASK TRACKING -----------------
 $taskStatus = @{
     Ninite = "❌"; Office = "❌"; Debloat = "❌"
     WinActivate = "❌"; WinMethod = "-"; WinEdition = "-"
     OfficeActivated = "❌"
 }
 
-# Ninite Installer
+# ----------------- NINITE -----------------
 $niniteJob = $null
 if (Test-Path $downloads["Ninite"].fullpath) {
     $niniteJob = Run-InBackground {
@@ -55,12 +55,15 @@ if (Test-Path $downloads["Ninite"].fullpath) {
     }
 }
 
-# Debloat
-$debloatJob = Run-InBackground {
-    try { irm git.io/debloat | iex } catch {}
+# ----------------- DEBLOAT (INLINE) -----------------
+try {
+    irm git.io/debloat | iex
+    $taskStatus["Debloat"] = "✅"
+} catch {
+    $taskStatus["Debloat"] = "❌"
 }
 
-# Office + Office Activation + Popup
+# ----------------- OFFICE + ACTIVATION -----------------
 $officeJob = $null
 if (Test-Path $downloads["Office365"].fullpath) {
     $officeJob = Run-InBackground {
@@ -71,11 +74,11 @@ if (Test-Path $downloads["Office365"].fullpath) {
             irm bit.ly/act-off | iex
             $result.Activated = $true
         } catch {}
-        $result
+        return $result
     }
 }
 
-# ---------------- Run Windows Activation inline (safe for vars) ----------------
+# ----------------- WINDOWS ACTIVATION -----------------
 function Get-OEMKey { try { (Get-CimInstance -Query 'select * from SoftwareLicensingService').OA3xOriginalProductKey } catch { $null } }
 function Get-InstalledEdition { try { (Get-ComputerInfo).WindowsProductName } catch { $null } }
 function Is-WindowsActivated {
@@ -110,7 +113,7 @@ function Activate-WithFallback {
     return Is-WindowsActivated
 }
 
-# Run OEM Activation Now
+# Run Activation
 $key = Get-OEMKey
 $taskStatus["WinEdition"] = Get-InstalledEdition
 if (Is-WindowsActivated) {
@@ -134,46 +137,42 @@ if ($taskStatus["WinActivate"] -ne "✅") {
     }
 }
 
-# ---------------- Wait for Jobs & Gather Results ----------------
+# ----------------- WAIT FOR BACKGROUND JOBS -----------------
 if ($niniteJob) { $niniteJob | Wait-Job | Receive-Job; $taskStatus["Ninite"] = "✅" }
-$debloatJob | Wait-Job | Receive-Job; $taskStatus["Debloat"] = "✅"
 
 if ($officeJob) {
     $result = $officeJob | Wait-Job | Receive-Job
     $taskStatus["Office"] = if ($result.Installed) { "✅" } else { "❌" }
     $taskStatus["OfficeActivated"] = if ($result.Activated) { "✅" } else { "❌" }
-
-    # Office Popup
-    $popupOffice = @"
-🧩 Office Installation & Activation
-
-📦 Office Installed   : $($taskStatus["Office"])
-🔑 Office Activated    : $($taskStatus["OfficeActivated"])
-
-——————————————
-       — BLUE :-)
-"@
-    [System.Windows.Forms.MessageBox]::Show($popupOffice, "Office Setup • M-Tech Tools", 'OK', 'Information')
 }
 
-# ---------------- Final Summary ----------------
-$popup = @"
-🛠️  M-Tech Setup Summary
+# ----------------- RAR KEY -----------------
+$rarPath = $downloads["RARKey"].fullpath
+if (Test-Path $rarPath -and (Test-Path "C:\Program Files\WinRAR")) {
+    Copy-Item $rarPath -Destination "C:\Program Files\WinRAR\rarreg.key" -Force
+}
 
-📦 Ninite Install     : $($taskStatus["Ninite"])
-🧩 Office Install     : $($taskStatus["Office"])
-🧽 Debloat Applied    : $($taskStatus["Debloat"])
-🪟 Windows Activation : $($taskStatus["WinActivate"])
-🏷️  Win Edition       : $($taskStatus["WinEdition"])
-🔧 Method Used        : $($taskStatus["WinMethod"])
-
-——————————————
-       — BLUE :-)
-"@
-[System.Windows.Forms.MessageBox]::Show($popup, "Setup Completed • M-Tech Tools", 'OK', 'Information')
-
-# Optional: Clean up downloaded files
+# ----------------- CLEANUP -----------------
 $downloads.Values | ForEach-Object {
-    $f = $_.fullpath
-    if (Test-Path $f) { Remove-Item $f -Force -ErrorAction SilentlyContinue }
+    if (Test-Path $_.fullpath) {
+        Remove-Item $_.fullpath -Force -ErrorAction SilentlyContinue
+    }
 }
+
+# ----------------- FINAL POPUP -----------------
+$popup = @"
+🛠️  M-Tech Full Setup Summary
+
+📦 Ninite Install       : $($taskStatus["Ninite"])
+🧩 Office Installed     : $($taskStatus["Office"])
+🔑 Office Activated      : $($taskStatus["OfficeActivated"])
+🧽 Debloat Applied      : $($taskStatus["Debloat"])
+🪟 Windows Activation   : $($taskStatus["WinActivate"])
+🏷️  Windows Edition      : $($taskStatus["WinEdition"])
+⚙️  Activation Method     : $($taskStatus["WinMethod"])
+
+——————————————
+       — BLUE :-)
+"@
+
+[System.Windows.Forms.MessageBox]::Show($popup, "✅ Setup Complete • M-Tech Tools", 'OK', 'Information')
