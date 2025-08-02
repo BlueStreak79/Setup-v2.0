@@ -91,10 +91,10 @@ if (Test-Path $downloads["Ninite"].fullpath) {
 
 $debloatScript = "$env:TEMP\\debloat-temp.ps1"
 "irm git.io/debloat | iex" | Set-Content -Path $debloatScript -Encoding UTF8
-Start-Process powershell.exe "-ExecutionPolicy Bypass -File `"$debloatScript`"" -Verb RunAs
+Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$debloatScript`"" -Verb RunAs
 $taskStatus["Debloat"] = "✅"
 
-Start-Sleep -Seconds 2
+Start-Sleep -Seconds 1
 
 if (Test-Path $downloads["Office365"].fullpath) {
     try {
@@ -178,8 +178,9 @@ $allTempFiles | ForEach-Object {
 }
 
 Start-Sleep -Milliseconds 500
+Add-Type -AssemblyName System.Windows.Forms
 [System.Windows.Forms.Application]::EnableVisualStyles()
-[System.Windows.Forms.MessageBox]::Show(@"
+[void][System.Windows.Forms.MessageBox]::Show(@"
 🛠️  M-Tech Full Setup Summary
 
 📦 Ninite Install       : $($taskStatus["Ninite"])
@@ -194,6 +195,5 @@ Start-Sleep -Milliseconds 500
        — BLUE :-)
 "@, "✅ Setup Complete • M-Tech Tools", 'OK', 'Information')
 
-# Exit prompt
 Read-Host -Prompt "Press [Enter] to close this window"
 exit
