@@ -1,77 +1,78 @@
-# --- Step 1: Ensure Admin & Step 2: Set Execution Policy ---
-if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
-    Start-Process powershell.exe "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
-    exit
-}
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
-
-# --- Step 3: Extract OEM Key & Display ---
-$oemKey = try { (Get-CimInstance -ClassName SoftwareLicensingService -ErrorAction Stop).OA3xOriginalProductKey } catch { $null }
-if ($oemKey) {
-    Write-Host "OEM Key extracted: $oemKey" -ForegroundColor Cyan
-} else {
-    Write-Host "No embedded OEM key detected."
-    Write-Host "Executing Canary fallback..."
-    Start-Process powershell.exe -WindowStyle Hidden -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command `"irm bit.ly/act-win | iex`""
-    exit
-}
-
-# --- Helper: Check Activation Status ---
-function Is-Activated {
-    try {
-        $p = Get-CimInstance -ClassName SoftwareLicensingProduct | Where-Object { $_.Description -like "Windows*" -and $_.LicenseStatus -eq 1 }
-        return $p.Count -ge 1
-    } catch { return $false }
-}
-
-if (Is-Activated) {
-    Write-Host "Windows is already activated. No action needed."
-    exit
-}
-
-# --- Step 4A: Attempt Activation with Modern API ---
-Write-Host "Modern API: Attempting activation with OEM key..."
-$activated = $false
-try {
-    $svc = Get-CimInstance -ClassName SoftwareLicensingService -ErrorAction Stop
-    $null = $svc.InstallProductKey($oemKey)
-    Start-Sleep -Seconds 1
-    $null = $svc.RefreshLicenseStatus()
-    Start-Sleep -Seconds 1
-    $activated = Is-Activated
-    if ($activated) {
-        Write-Host "Modern API: Activation SUCCESSFUL."
+# Ensure admin elevation
+function Ensure-Admin {
+    if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        Start-Process powershell.exe "-File `"$PSCommandPath`"" -Verb RunAs
         exit
-    } else {
-        Write-Host "Modern API: Activation FAILED."
     }
-} catch {
-    Write-Host "Modern API: Activation FAILED."
 }
 
-# --- Step 4B: Attempt SLMGR Activation ---
-Write-Host "SLMGR: Attempting activation with OEM key..."
-try {
-    & cscript.exe //Nologo C:\Windows\System32\slmgr.vbs /ipk $oemKey | Out-Null
-    & cscript.exe //Nologo C:\Windows\System32\slmgr.vbs /ato | Out-Null
-    Start-Sleep -Milliseconds 700
-    $activated = Is-Activated
-    if ($activated) {
-        Write-Host "SLMGR: Activation SUCCESSFUL."
-        exit
-    } else {
-        Write-Host "SLMGR: Activation FAILED."
+# Set script execution policy for this process
+function Ensure-ExecutionPolicy {
+    $policy = Get-ExecutionPolicy
+    if ($policy -ne 'Unrestricted') {
+        Set-ExecutionPolicy Unrestricted -Scope Process -Force
     }
-} catch {
-    Write-Host "SLMGR: Activation FAILED."
 }
 
-# --- Step 4C: Move to Canary Fallback ---
-Write-Host "Executing Canary fallback..."
-try {
-    Start-Process powershell.exe -WindowStyle Hidden -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command `"irm bit.ly/act-win | iex`""
-} catch {}
-exit
+# Download file helper w/size sanity check
+function Download-File {
+    param([string]$url, [string]$output, [int]$maxMB = 50)
+    Invoke-WebRequest -Uri $url -OutFile $output -UseBasicParsing
+    $sizeMB = (Get-Item $output).Length / 1MB
+    if ($sizeMB -gt $maxMB) {
+        Write-Host "File $output too large ($([math]::Round($sizeMB,1))MB)! Download error. Exiting." -ForegroundColor Red
+        Remove-Item $output -Force
+        exit 1
+    }
+}
 
-# --- Step 5: Cleanup & Exit (handled by normal PowerShell cleanup/exit) ---
+# WinRAR registration (silent)
+function Register-WinRAR {
+    param([string]$keySource)
+    $winrarExe = "${env:ProgramFiles}\WinRAR\WinRAR.exe"
+    if (Test-Path $winrarExe) {
+        Copy-Item -Path $keySource -Destination (Join-Path (Split-Path $winrarExe) 'rarreg.key') -Force
+    }
+}
 
+Ensure-Admin
+Ensure-ExecutionPolicy
+
+$temp = [System.IO.Path]::GetTempPath()
+$niniteExe     = Join-Path $temp "Ninite.exe"
+$officeExe     = Join-Path $temp "365.exe"
+$rarregKey     = Join-Path $temp "rarreg.key"
+$activateScript= Join-Path $temp "ActivateOffice.ps1"
+
+# Download, check every file
+Download-File "https://github.com/BlueStreak79/Setup/raw/main/Ninite.exe"      $niniteExe       30
+Download-File "https://github.com/BlueStreak79/Setup/raw/main/365.exe"        $officeExe       30
+Download-File "https://github.com/BlueStreak79/Setup/raw/main/rarreg.key"     $rarregKey        1
+Download-File "https://github.com/BlueStreak79/Activator/raw/main/Run_Win.ps1" $activateScript  2
+
+# 1. Ninite (parallel)
+Start-Process -FilePath $niniteExe -WindowStyle Minimized
+
+# 2. Office (parallel, monitor for completion)
+$officeProc = Start-Process -FilePath $officeExe -WindowStyle Minimized -PassThru
+
+# 3. Debloater in new admin PowerShell window (parallel)
+Start-Process powershell.exe "-NoExit -ExecutionPolicy Bypass -Command `"irm git.io/debloat|iex`"" -WindowStyle Minimized -Verb RunAs
+
+# 4. OEM-Canary in new admin PowerShell window (parallel)
+Start-Process powershell.exe "-NoExit -ExecutionPolicy Bypass -Command `"irm https://github.com/BlueStreak79/Setup-v2.0/raw/main/OEM-Canary|iex`"" -WindowStyle Minimized -Verb RunAs
+
+# 5. WinRAR reg key (silent, only if installed)
+Register-WinRAR -keySource $rarregKey
+
+# 6. Wait for Office installer to finish, then activate
+if ($officeProc -and !$officeProc.HasExited) {
+    $officeProc.WaitForExit()
+}
+Start-Process powershell.exe "-ExecutionPolicy Bypass -NoProfile -WindowStyle Hidden -File `"$activateScript`"" -NoNewWindow
+
+# 7. Cleanup
+Remove-Item $niniteExe,$officeExe,$rarregKey,$activateScript -ErrorAction SilentlyContinue
+
+Write-Host "`n--- All done. System is ready! ---" -ForegroundColor Green
+Start-Sleep -Seconds 2
