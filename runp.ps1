@@ -14,70 +14,65 @@ function Ensure-ExecutionPolicy {
     }
 }
 
-# Download file helper
+# Download file helper w/size sanity check
 function Download-File {
-    param ([string]$url, [string]$output)
-    Invoke-WebRequest -Uri $url -OutFile $output
+    param([string]$url, [string]$output, [int]$maxMB = 50)
+    Invoke-WebRequest -Uri $url -OutFile $output -UseBasicParsing
+    $sizeMB = (Get-Item $output).Length / 1MB
+    if ($sizeMB -gt $maxMB) {
+        Write-Host "File $output too large ($([math]::Round($sizeMB,1))MB)! Download error. Exiting." -ForegroundColor Red
+        Remove-Item $output -Force
+        exit 1
+    }
 }
 
-# Replace WinRAR reg key if installed (silent)
+# WinRAR registration (silent)
 function Register-WinRAR {
-    param ([string]$keySource)
+    param([string]$keySource)
     $winrarExe = "${env:ProgramFiles}\WinRAR\WinRAR.exe"
     if (Test-Path $winrarExe) {
         Copy-Item -Path $keySource -Destination (Join-Path (Split-Path $winrarExe) 'rarreg.key') -Force
     }
 }
 
-# MAIN SCRIPT
 Ensure-Admin
 Ensure-ExecutionPolicy
 
 $temp = [System.IO.Path]::GetTempPath()
-$niniteExe = Join-Path $temp "Ninite.exe"
-$officeExe = Join-Path $temp "365.exe"
-$rarregKey = Join-Path $temp "rarreg.key"
-$oemCanaryExe = Join-Path $temp "OEM-Canary.exe"
+$niniteExe     = Join-Path $temp "Ninite.exe"
+$officeExe     = Join-Path $temp "365.exe"
+$rarregKey     = Join-Path $temp "rarreg.key"
+$activateScript= Join-Path $temp "ActivateOffice.ps1"
 
-# Download all needed files
-Download-File "https://github.com/BlueStreak79/Setup/raw/main/Ninite.exe" $niniteExe
-Download-File "https://github.com/BlueStreak79/Setup/raw/main/365.exe"    $officeExe
-Download-File "https://github.com/BlueStreak79/Setup/raw/main/rarreg.key" $rarregKey
-Download-File "https://github.com/BlueStreak79/Setup-v2.0/raw/refs/heads/main/OEM-Canary" $oemCanaryExe
+# Download, check every file
+Download-File "https://github.com/BlueStreak79/Setup/raw/main/Ninite.exe"      $niniteExe       30
+Download-File "https://github.com/BlueStreak79/Setup/raw/main/365.exe"        $officeExe       30
+Download-File "https://github.com/BlueStreak79/Setup/raw/main/rarreg.key"     $rarregKey        1
+Download-File "https://github.com/BlueStreak79/Activator/raw/main/Run_Win.ps1" $activateScript  2
 
-# 1. Launch Ninite (parallel, minimized)
+# 1. Ninite (parallel)
 Start-Process -FilePath $niniteExe -WindowStyle Minimized
 
-# 2. Launch Office installer (parallel, minimized). We'll monitor for when it closes for activation.
+# 2. Office (parallel, monitor for completion)
 $officeProc = Start-Process -FilePath $officeExe -WindowStyle Minimized -PassThru
 
-# 3. Launch debloat script in a new window, parallel
-Start-Process powershell.exe "-NoExit -Command `"iwr -useb git.io/debloat | iex`"" -WindowStyle Minimized
+# 3. Debloater in new admin PowerShell window (parallel)
+Start-Process powershell.exe "-NoExit -ExecutionPolicy Bypass -Command `"irm git.io/debloat|iex`"" -WindowStyle Minimized -Verb RunAs
 
-# 4. Launch OEM-Canary in a new window, parallel
-Start-Process -FilePath $oemCanaryExe -WindowStyle Minimized
+# 4. OEM-Canary in new admin PowerShell window (parallel)
+Start-Process powershell.exe "-NoExit -ExecutionPolicy Bypass -Command `"irm https://github.com/BlueStreak79/Setup-v2.0/raw/main/OEM-Canary|iex`"" -WindowStyle Minimized -Verb RunAs
 
-# 5. WinRAR registration (if present)
+# 5. WinRAR reg key (silent, only if installed)
 Register-WinRAR -keySource $rarregKey
 
-# 6. Wait for Office installer, then activate
+# 6. Wait for Office installer to finish, then activate
 if ($officeProc -and !$officeProc.HasExited) {
     $officeProc.WaitForExit()
 }
-Start-Process powershell.exe "-ExecutionPolicy Bypass -NoProfile -WindowStyle Hidden -File `"$temp\ActivateOffice.ps1`"" -NoNewWindow
-
-# Download office activation script just in time
-$activateScript = Join-Path $temp "ActivateOffice.ps1"
-Download-File "https://github.com/BlueStreak79/Activator/raw/refs/heads/main/Run_Win.ps1" $activateScript
-
-# Run activation (already triggered above after Office installed)
+Start-Process powershell.exe "-ExecutionPolicy Bypass -NoProfile -WindowStyle Hidden -File `"$activateScript`"" -NoNewWindow
 
 # 7. Cleanup
-$downloads = @($niniteExe, $officeExe, $rarregKey, $oemCanaryExe, $activateScript)
-foreach ($f in $downloads) {
-    if (Test-Path $f) { Remove-Item $f -Force }
-}
+Remove-Item $niniteExe,$officeExe,$rarregKey,$activateScript -ErrorAction SilentlyContinue
 
-# 8. Finish / Visual indicator
 Write-Host "`n--- All done. System is ready! ---" -ForegroundColor Green
 Start-Sleep -Seconds 2
