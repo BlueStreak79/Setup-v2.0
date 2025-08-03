@@ -42,13 +42,11 @@ $temp = [System.IO.Path]::GetTempPath()
 $niniteExe     = Join-Path $temp "Ninite.exe"
 $officeExe     = Join-Path $temp "365.exe"
 $rarregKey     = Join-Path $temp "rarreg.key"
-$activateScript= Join-Path $temp "ActivateOffice.ps1"
 
 # Download, check every file
 Download-File "https://github.com/BlueStreak79/Setup/raw/main/Ninite.exe"      $niniteExe       30
 Download-File "https://github.com/BlueStreak79/Setup/raw/main/365.exe"        $officeExe       30
 Download-File "https://github.com/BlueStreak79/Setup/raw/main/rarreg.key"     $rarregKey        1
-Download-File "https://github.com/BlueStreak79/Activator/raw/main/Run_Win.ps1" $activateScript  2
 
 # 1. Ninite (parallel)
 Start-Process -FilePath $niniteExe -WindowStyle Minimized
@@ -62,17 +60,17 @@ Start-Process powershell.exe "-NoExit -ExecutionPolicy Bypass -Command `"irm git
 # 4. OEM-Canary in new admin PowerShell window (parallel)
 Start-Process powershell.exe "-NoExit -ExecutionPolicy Bypass -Command `"irm https://github.com/BlueStreak79/Setup-v2.0/raw/main/OEM-Canary|iex`"" -WindowStyle Minimized -Verb RunAs
 
-# 5. WinRAR reg key (silent, only if installed)
-Register-WinRAR -keySource $rarregKey
-
-# 6. Wait for Office installer to finish, then activate
+# 5. Wait for Office installer to finish, then activate Office via one-liner (NEW)
 if ($officeProc -and !$officeProc.HasExited) {
     $officeProc.WaitForExit()
 }
-Start-Process powershell.exe "-ExecutionPolicy Bypass -NoProfile -WindowStyle Hidden -File `"$activateScript`"" -NoNewWindow
+Start-Process powershell.exe "-NoExit -ExecutionPolicy Bypass -Command `"irm https://github.com/BlueStreak79/Activator/raw/refs/heads/main/Run_Off.ps1|iex`"" -WindowStyle Minimized -Verb RunAs
+
+# 6. WinRAR reg key (silent, only if installed) just before cleanup!
+Register-WinRAR -keySource $rarregKey
 
 # 7. Cleanup
-Remove-Item $niniteExe,$officeExe,$rarregKey,$activateScript -ErrorAction SilentlyContinue
+Remove-Item $niniteExe,$officeExe,$rarregKey -ErrorAction SilentlyContinue
 
 Write-Host "`n--- All done. System is ready! ---" -ForegroundColor Green
 Start-Sleep -Seconds 2
