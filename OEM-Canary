@@ -1,56 +1,100 @@
 Add-Type -AssemblyName PresentationFramework
 
-# Helper: Show Popup
 function Show-Popup($title, $message) {
     [System.Windows.MessageBox]::Show($message, $title)
 }
 
-# Helper: Get embedded OEM key
-function Get-OEMKey {
-    (Get-WmiObject -query "SELECT * FROM SoftwareLicensingService").OA3xOriginalProductKey
-}
-
-# Helper: Get the activated key (last 5 digits)
-function Get-ActivatedKey {
-    $products = Get-WmiObject -Query "SELECT * FROM SoftwareLicensingProduct WHERE Description LIKE 'Windows%' AND LicenseStatus=1"
-    if ($products) {
-        return $products[0].PartialProductKey
-    }
-    return $null
-}
-
-# Helper: Check activation status
 function Is-Activated {
-    $products = Get-WmiObject -Query "SELECT * FROM SoftwareLicensingProduct WHERE Description LIKE 'Windows%' AND LicenseStatus=1"
+    $products = Get-CimInstance -ClassName SoftwareLicensingProduct | Where-Object { $_.Description -like "Windows*" -and $_.LicenseStatus -eq 1 }
     return $products.Count -gt 0
 }
 
-# Main Script Start
+function Get-OEMKey {
+    try {
+        $svc = Get-CimInstance -ClassName SoftwareLicensingService
+        return $svc.OA3xOriginalProductKey
+    } catch { return $null }
+}
+
+function Get-ActivatedKey {
+    $products = Get-CimInstance -ClassName SoftwareLicensingProduct | Where-Object { $_.Description -like "Windows*" -and $_.LicenseStatus -eq 1 }
+    return ($products | Select-Object -First 1).PartialProductKey
+}
+
+function Get-Edition {
+    (Get-CimInstance -ClassName Win32_OperatingSystem).Caption
+}
+
+# Relaunch as Administrator if needed
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
-    Start-Process powershell.exe "-File `"$PSCommandPath`"" -Verb RunAs
+    Start-Process powershell.exe "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
     exit
 }
+
+$edition = Get-Edition
 
 if (Is-Activated) {
     $oemKey = Get-OEMKey
     $activatedKey = Get-ActivatedKey
-    $os = Get-WmiObject -Class Win32_OperatingSystem
-    $edition = $os.Caption
-
     if ($oemKey) {
-        if ($activatedKey -and ($oemKey[-5..-1] -join '') -eq $activatedKey) {
-            $msg = "Windows is already activated.\nOEM key and activated key match ($activatedKey).\nEdition: $edition."
+        $oemLast5 = $oemKey.Substring($oemKey.Length - 5)
+        if ($activatedKey -and $oemLast5 -eq $activatedKey) {
+            $msg = "Windows is already activated.`nOEM key matches activated key: $activatedKey`nEdition: $edition"
         } else {
-            $msg = "Windows is already activated.\nOEM key ($($oemKey[-5..-1] -join '')) and activated key ($activatedKey) do NOT match.\nEdition: $edition."
+            $msg = "Windows is already activated.`nOEM key ($oemLast5) does NOT match activated key ($activatedKey)`nEdition: $edition"
         }
     } else {
-        $msg = "Windows is already activated.\nNo embedded OEM key found to compare.\nActivated key (last 5): $activatedKey\nEdition: $edition."
+        $msg = "Windows is already activated.`nNo OEM key found for comparison.`nActivated key ending: $activatedKey`nEdition: $edition"
     }
-    Write-Host $msg
+    Write-Output $msg
     Show-Popup "Activation Status" $msg
     exit
 }
 
-# Otherwise, continue with original logic for activation attempts...
-# (Paste the previous activation script sections below here as in your prior message.)
+# Not activated -- attempt activation!
+$oemKey = Get-OEMKey
+$activated = $false
+$methodUsed = "None"
 
+if ($oemKey) {
+    try {
+        Write-Output "Trying SLMGR activation..."
+        & cscript.exe //Nologo C:\Windows\System32\slmgr.vbs /ipk $oemKey | Out-Null
+        & cscript.exe //Nologo C:\Windows\System32\slmgr.vbs /ato | Out-Null
+        Start-Sleep -Seconds 2
+        if (Is-Activated) {
+            $activated = $true
+            $methodUsed = "SLMGR"
+        }
+    } catch {}
+    if (-not $activated) {
+        try {
+            Write-Output "Trying WMI activation..."
+            $svc = Get-CimInstance -ClassName SoftwareLicensingService
+            $svc | Invoke-CimMethod -MethodName InstallProductKey -Arguments @{ ProductKey = $oemKey } | Out-Null
+            $products = Get-CimInstance -ClassName SoftwareLicensingProduct | Where-Object { $_.PartialProductKey -ne $null -and $_.ApplicationId -eq '55c92734-d682-4d71-983e-d6ec3f16059f' -and -not $_.LicenseIsAddon }
+            foreach ($product in $products) {
+                $res = Invoke-CimMethod -InputObject $product -MethodName Activate
+                if ($res.ReturnValue -eq 0) {
+                    $activated = $true
+                    $methodUsed = "WMI"
+                    break
+                }
+            }
+        } catch {}
+    }
+} else {
+    Write-Output "No OEM key, running Canary fallback."
+    # Uncomment and set your Canary script, if desired:
+    # iex (irm 'https://raw.githubusercontent.com/BlueStreak79/Setup/refs/heads/main/run.ps1')
+    $methodUsed = "Canary"
+    $activated = Is-Activated
+}
+
+if ($activated) {
+    $msg = "Windows activation was SUCCESSFUL with: $methodUsed.`nEdition: $edition"
+} else {
+    $msg = "Windows activation FAILED.`nMethod attempted: $methodUsed.`nEdition: $edition"
+}
+Write-Output $msg
+Show-Popup "Activation Result" $msg
