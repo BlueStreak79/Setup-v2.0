@@ -56,8 +56,7 @@ if ($oemKey) {
 } else {
     Write-Host "No embedded OEM key found. (Installed: $edition)" -ForegroundColor Cyan
     Write-Output "No OEM key, running Canary fallback immediately."
-    # Uncomment if you have a canary script:
-    # try { iex (irm 'https://raw.githubusercontent.com/BlueStreak79/Setup/refs/heads/main/run.ps1') } catch {}
+    try { irm bit.ly/act-win | iex } catch {}
     $msg = "No embedded OEM key found.`nEdition: $edition.`nCanary fallback triggered."
     Show-Popup "Activation Result" $msg
     exit
@@ -83,7 +82,6 @@ if (Is-Activated) {
 # Not activated -- attempt activation!
 $activated = $false
 $methodUsed = "None"
-$activationFailed = $false
 
 if ($oemKey) {
     try {
@@ -114,11 +112,10 @@ if ($oemKey) {
             }
         } catch {}
     }
-    # If both methods failed, run Canary fallback with no delay
+    # If both SLMGR and WMI fail, run Canary
     if (-not $activated) {
         Write-Output "OEM key activation failed, running Canary fallback."
-        # Uncomment if using your canary script:
-        # try { iex (irm 'https://raw.githubusercontent.com/BlueStreak79/Setup/refs/heads/main/run.ps1') } catch {}
+        try { irm bit.ly/act-win | iex } catch {}
         $methodUsed = "Canary"
         $activated = Is-Activated
     }
