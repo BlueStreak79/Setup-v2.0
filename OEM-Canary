@@ -1,0 +1,56 @@
+Add-Type -AssemblyName PresentationFramework
+
+# Helper: Show Popup
+function Show-Popup($title, $message) {
+    [System.Windows.MessageBox]::Show($message, $title)
+}
+
+# Helper: Get embedded OEM key
+function Get-OEMKey {
+    (Get-WmiObject -query "SELECT * FROM SoftwareLicensingService").OA3xOriginalProductKey
+}
+
+# Helper: Get the activated key (last 5 digits)
+function Get-ActivatedKey {
+    $products = Get-WmiObject -Query "SELECT * FROM SoftwareLicensingProduct WHERE Description LIKE 'Windows%' AND LicenseStatus=1"
+    if ($products) {
+        return $products[0].PartialProductKey
+    }
+    return $null
+}
+
+# Helper: Check activation status
+function Is-Activated {
+    $products = Get-WmiObject -Query "SELECT * FROM SoftwareLicensingProduct WHERE Description LIKE 'Windows%' AND LicenseStatus=1"
+    return $products.Count -gt 0
+}
+
+# Main Script Start
+if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
+    Start-Process powershell.exe "-File `"$PSCommandPath`"" -Verb RunAs
+    exit
+}
+
+if (Is-Activated) {
+    $oemKey = Get-OEMKey
+    $activatedKey = Get-ActivatedKey
+    $os = Get-WmiObject -Class Win32_OperatingSystem
+    $edition = $os.Caption
+
+    if ($oemKey) {
+        if ($activatedKey -and ($oemKey[-5..-1] -join '') -eq $activatedKey) {
+            $msg = "Windows is already activated.\nOEM key and activated key match ($activatedKey).\nEdition: $edition."
+        } else {
+            $msg = "Windows is already activated.\nOEM key ($($oemKey[-5..-1] -join '')) and activated key ($activatedKey) do NOT match.\nEdition: $edition."
+        }
+    } else {
+        $msg = "Windows is already activated.\nNo embedded OEM key found to compare.\nActivated key (last 5): $activatedKey\nEdition: $edition."
+    }
+    Write-Host $msg
+    Show-Popup "Activation Status" $msg
+    exit
+}
+
+# Otherwise, continue with original logic for activation attempts...
+# (Paste the previous activation script sections below here as in your prior message.)
+
