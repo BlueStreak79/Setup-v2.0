@@ -31,20 +31,47 @@ function Get-Edition {
     (Get-CimInstance -ClassName Win32_OperatingSystem).Caption
 }
 
+# Attempt to map key pattern to associated edition (best effort, for clear output)
+function Detect-Key-Edition($key) {
+    if ($null -eq $key) { return "Unknown" }
+    switch -Regex ($key) {
+        "NRG8B|6F4BB|2TYW3|VK7JG|NPPR9|YTMG3" { return "Pro" }
+        "TX9XD|BT79Q" { return "Home" }
+        "3V66T" { return "Enterprise" }
+        "WNMTR|NPPR9" { return "Education" }
+        default { return "Unknown" }
+    }
+}
+
 $edition = Get-Edition
+$oemKey = Get-OEMKey
+$keyEdition = Detect-Key-Edition($oemKey)
+
+# Show OEM key and edition in cyan if found
+if ($oemKey) {
+    Write-Host "Detected OEM Key: $oemKey (Key Edition: $keyEdition, Installed: $edition)" -ForegroundColor Cyan
+} else {
+    Write-Host "No embedded OEM key found. (Installed: $edition)" -ForegroundColor Cyan
+    # Canary fallback immediately
+    Write-Output "No OEM key, running Canary fallback immediately."
+    # Uncomment below if using your canary script:
+    # iex (irm 'https://raw.githubusercontent.com/BlueStreak79/Setup/refs/heads/main/run.ps1')
+    $msg = "No embedded OEM key found.`nEdition: $edition.`nCanary fallback triggered."
+    Show-Popup "Activation Result" $msg
+    exit
+}
 
 if (Is-Activated) {
-    $oemKey = Get-OEMKey
     $activatedKey = Get-ActivatedKey
     if ($oemKey) {
         $oemLast5 = $oemKey.Substring($oemKey.Length - 5)
         if ($activatedKey -and $oemLast5 -eq $activatedKey) {
-            $msg = "Windows is already activated.`nOEM key matches activated key: $activatedKey`nEdition: $edition"
+            $msg = "Windows is already activated.`nOEM key matches activated key: $activatedKey`nInstalled: $edition (Key Edition: $keyEdition)"
         } else {
-            $msg = "Windows is already activated.`nOEM key ($oemLast5) does NOT match activated key ($activatedKey)`nEdition: $edition"
+            $msg = "Windows is already activated.`nOEM key ($oemLast5, $keyEdition) does NOT match activated key ($activatedKey)`nInstalled: $edition"
         }
     } else {
-        $msg = "Windows is already activated.`nNo OEM key found for comparison.`nActivated key ending: $activatedKey`nEdition: $edition"
+        $msg = "Windows is already activated.`nNo OEM key found for comparison.`nActivated key ending: $activatedKey`nInstalled: $edition"
     }
     Write-Output $msg
     Show-Popup "Activation Status" $msg
@@ -52,9 +79,10 @@ if (Is-Activated) {
 }
 
 # Not activated -- attempt activation!
-$oemKey = Get-OEMKey
 $activated = $false
 $methodUsed = "None"
+$slmgrError = $null
+$wmiError = $null
 
 if ($oemKey) {
     try {
@@ -66,7 +94,7 @@ if ($oemKey) {
             $activated = $true
             $methodUsed = "SLMGR"
         }
-    } catch {}
+    } catch { $slmgrError = $_ }
     if (-not $activated) {
         try {
             Write-Output "Trying WMI activation..."
@@ -81,20 +109,20 @@ if ($oemKey) {
                     break
                 }
             }
-        } catch {}
+        } catch { $wmiError = $_ }
     }
-} else {
-    Write-Output "No OEM key, running Canary fallback."
-    # If you want to use the Canary fallback, uncomment:
-    # iex (irm 'https://raw.githubusercontent.com/BlueStreak79/Setup/refs/heads/main/run.ps1')
-    $methodUsed = "Canary"
-    $activated = Is-Activated
 }
 
+# Compose clear status output if failure due to edition mismatch or key invalid
 if ($activated) {
-    $msg = "Windows activation was SUCCESSFUL with: $methodUsed.`nEdition: $edition"
+    $msg = "Windows activation was SUCCESSFUL with: $methodUsed.`nInstalled: $edition (Key Edition: $keyEdition)"
 } else {
-    $msg = "Windows activation FAILED.`nMethod attempted: $methodUsed.`nEdition: $edition"
+    if ($slmgrError -or $wmiError) {
+        $details = if ($slmgrError) { $slmgrError.Exception.Message } elseif ($wmiError) { $wmiError.Exception.Message } else { "Unknown error" }
+        $msg = "Windows activation FAILED.`nInstalled version: $edition`nOEM key is for: $keyEdition`n(Details: $details)`nMethod attempted: $methodUsed"
+    } else {
+        $msg = "Windows activation FAILED.`nInstalled version: $edition`nOEM key is for: $keyEdition`nMethod attempted: $methodUsed"
+    }
 }
 Write-Output $msg
 Show-Popup "Activation Result" $msg
