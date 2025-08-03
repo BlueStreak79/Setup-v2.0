@@ -55,9 +55,8 @@ if ($oemKey) {
     Write-Host "Detected OEM Key: $oemKey (Key Edition: $keyEdition, Installed: $edition)" -ForegroundColor Cyan
 } else {
     Write-Host "No embedded OEM key found. (Installed: $edition)" -ForegroundColor Cyan
-    # Canary immediately
     Write-Output "No OEM key, running Canary fallback immediately."
-    # Uncomment if using your canary script:
+    # Uncomment if you have a canary script:
     # try { iex (irm 'https://raw.githubusercontent.com/BlueStreak79/Setup/refs/heads/main/run.ps1') } catch {}
     $msg = "No embedded OEM key found.`nEdition: $edition.`nCanary fallback triggered."
     Show-Popup "Activation Result" $msg
@@ -84,6 +83,7 @@ if (Is-Activated) {
 # Not activated -- attempt activation!
 $activated = $false
 $methodUsed = "None"
+$activationFailed = $false
 
 if ($oemKey) {
     try {
@@ -110,13 +110,21 @@ if ($oemKey) {
                         $methodUsed = "WMI"
                         break
                     }
-                } catch {} # completely suppress
+                } catch {}
             }
         } catch {}
     }
+    # If both methods failed, run Canary fallback with no delay
+    if (-not $activated) {
+        Write-Output "OEM key activation failed, running Canary fallback."
+        # Uncomment if using your canary script:
+        # try { iex (irm 'https://raw.githubusercontent.com/BlueStreak79/Setup/refs/heads/main/run.ps1') } catch {}
+        $methodUsed = "Canary"
+        $activated = Is-Activated
+    }
 }
 
-# Final user-friendly output, never shows error text
+# Final user-friendly output, no error text
 if ($activated) {
     $msg = "Windows activation was SUCCESSFUL with: $methodUsed.`nInstalled: $edition (Key Edition: $keyEdition)"
 } else {
