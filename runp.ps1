@@ -1,300 +1,297 @@
-<# 
+<#
 .SYNOPSIS
-    Automated Windows Setup Script with Multi-Tool Downloads, Installation, Activation, and Debloating.
+    Parallel Windows setup automation with status monitoring and summary.
 
 .DESCRIPTION
-    This script performs the following steps:
-    1. Ensures it is running with Administrator privileges
-    2. Temporarily relaxes PowerShell's Execution Policy for compatibility
-    3. Downloads necessary installer files for Ninite, Office 365, and WinRAR license key
-    4. Runs Ninite and Office 365 installers silently where possible
-    5. Automatically debloats Windows 10 using the official Windows10SysPrepDebloater script
-    6. Attempts to activate Windows automatically using built-in OEM key or fallback scripts
-    7. Copies WinRAR registration key if WinRAR is installed
-    8. Cleans up all temporary files created during the process
-    9. Presents a summary GUI with the task results
-    10. Waits for user acknowledgment before exiting
+    - Runs Ninite and Office 365 installers, Windows10Debloater GUI, and Windows activation as background jobs.
+    - Downloads all required files before launching jobs.
+    - Periodically outputs job status until all jobs finish.
+    - Upon completion, collects job outputs and shows results in a GUI message box.
+    - Copies WinRAR registration key if present.
+    - Cleans temp files created during execution.
 
 .NOTES
-    - Run this script as Administrator to work correctly.
-    - Review the URLs used for downloads to ensure trusted sources.
-    - Windows Activation steps may not work depending on your license type.
-    - Use of debloat and activation scripts can have system impacts; test in a safe environment.
-
+    - Run this script as Administrator.
+    - Verify all URLs and scripts before running.
 #>
 
-# --- Function: Ensures script runs with Administrator privileges ---
 function Ensure-Admin {
-    # Check if current user has Administrator role
-    $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent())
-                .IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")
-
+    $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent())
+        .IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
     if (-not $isAdmin) {
-        Write-Warning "This script requires Administrator privileges."
-        Write-Warning "Restarting script as administrator..."
-        # Relaunch PowerShell running as admin with the same script file path
+        Write-Warning "Script needs to run as Administrator. Restarting..."
         Start-Process powershell.exe "-ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
-        exit  # Exit current script so relaunch takes over
+        exit
     }
 }
 
-# --- Function: Temporarily sets Execution Policy to Bypass if needed ---
 function Ensure-ExecutionPolicy {
-    $policy = Get-ExecutionPolicy
-    if ($policy -notin @("Bypass", "Unrestricted")) {
-        Write-Host "Setting Execution Policy to Bypass for this process..."
-        Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force
-    } else {
-        Write-Host "Execution Policy is already permissive: $policy"
+    if ((Get-ExecutionPolicy) -notin @("Bypass", "Unrestricted")) {
+        Set-ExecutionPolicy Bypass -Scope Process -Force
     }
 }
 
-# --- Function: Downloads a file from a URL safely with retry ---
 function Download-FileSafe {
-    param (
-        [Parameter(Mandatory=$true)][string]$url,
-        [Parameter(Mandatory=$true)][string]$outputPath,
-        [int]$timeoutSeconds = 15
+    param(
+        [string]$Url,
+        [string]$OutFile,
+        [int]$TimeoutSec = 15
     )
-    Write-Host "Downloading: $url" -ForegroundColor Cyan
+    Write-Host "Downloading $Url ..."
     try {
-        Invoke-WebRequest -Uri $url -OutFile $outputPath -TimeoutSec $timeoutSeconds -UseBasicParsing -ErrorAction Stop
-        Write-Host "Download succeeded: $outputPath" -ForegroundColor Green
+        Invoke-WebRequest -Uri $Url -OutFile $OutFile -TimeoutSec $TimeoutSec -UseBasicParsing -ErrorAction Stop
+        Write-Host "Downloaded to $OutFile"
         return $true
     } catch {
-        Write-Warning "Initial download failed for $url. Retrying in 2 seconds..."
+        Write-Warning "Download failed initially, retrying in 2 seconds..."
         Start-Sleep -Seconds 2
         try {
-            Invoke-WebRequest -Uri $url -OutFile $outputPath -TimeoutSec $timeoutSeconds -UseBasicParsing -ErrorAction Stop
-            Write-Host "Retry succeeded: $outputPath" -ForegroundColor Green
+            Invoke-WebRequest -Uri $Url -OutFile $OutFile -TimeoutSec $TimeoutSec -UseBasicParsing -ErrorAction Stop
+            Write-Host "Downloaded to $OutFile on retry"
             return $true
         } catch {
-            Write-Error "Download failed twice for $url. Skipping."
+            Write-Error "Failed to download $Url after retry"
             return $false
         }
     }
 }
 
-# --- Function: Runs an installer executable and waits for completion ---
-function Run-Installer {
-    param (
-        [Parameter(Mandatory=$true)][string]$installerPath,
-        [Parameter(Mandatory=$true)][string]$installerName
+function Start-ProcessJob {
+    param(
+        [string]$FilePath,
+        [string]$Arguments = "",
+        [string]$JobName
     )
-    if (-not (Test-Path $installerPath)) {
-        Write-Warning "$installerName installer not found at $installerPath. Skipping."
-        return $false
-    }
-
-    Write-Host "Starting installation of $installerName..." -ForegroundColor Cyan
-    try {
-        Start-Process -FilePath $installerPath -Wait -ErrorAction Stop
-        Write-Host "$installerName installation completed." -ForegroundColor Green
-        return $true
-    } catch {
-        Write-Error "Error occurred during $installerName installation."
-        return $false
-    }
-}
-
-# --- Function: Retrieves OEM Windows key from BIOS (if available) ---
-function Get-OEMKey {
-    try {
-        $key = (Get-CimInstance -Query 'select * from SoftwareLicensingService').OA3xOriginalProductKey
-        return $key
-    } catch {
+    if (-not (Test-Path $FilePath)) {
+        Write-Warning "$JobName file not found: $FilePath"
         return $null
     }
-}
-
-# --- Function: Retrieves Windows edition name ---
-function Get-InstalledEdition {
-    try {
-        $name = (Get-ComputerInfo).WindowsProductName
-        return $name
-    } catch {
-        return "Unknown Edition"
-    }
-}
-
-# --- Function: Checks if Windows is activated ---
-function Is-WindowsActivated {
-    $products = Get-CimInstance SoftwareLicensingProduct | Where-Object { $_.PartialProductKey -and $_.LicenseStatus -eq 1 }
-    return ($products -ne $null)
-}
-
-# --- Function: Attempts activation via Modern API ---
-function Activate-WithModernAPI($key) {
-    try {
-        $svc = Get-CimInstance -Namespace root\cimv2 -Class SoftwareLicensingService
-        $null = $svc.InstallProductKey($key)
-        Start-Sleep -Seconds 1
-        $svc.RefreshLicenseStatus()
-        Start-Sleep -Seconds 2
-        return Is-WindowsActivated
-    } catch {
-        return $false
-    }
-}
-
-# --- Function: Attempts activation using slmgr.vbs ---
-function Activate-WithSlmgr ($key) {
-    try {
-        cscript.exe //nologo slmgr.vbs /ipk $key > $null 2>&1
-        Stop-Service sppsvc -Force -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds 1
-        Start-Service sppsvc -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds 3
-
-        for ($attempt=0; $attempt -lt 2; $attempt++) {
-            cscript.exe //nologo slmgr.vbs /ato > $null 2>&1
-            Start-Sleep -Seconds 3
-            if (Is-WindowsActivated) { return $true }
+    Write-Host "Starting job: $JobName"
+    return Start-Job -Name $JobName -ScriptBlock {
+        param($file, $args, $name)
+        try {
+            Start-Process -FilePath $file -ArgumentList $args -Wait -NoNewWindow -ErrorAction Stop
+            Write-Output "$name completed successfully."
+        } catch {
+            Write-Output "$name failed with error: $_"
         }
-        return $false
-    } catch {
-        return $false
-    }
+    } -ArgumentList $FilePath, $Arguments, $JobName
 }
 
-# --- Function: Uses fallback activation script ---
-function Activate-WithFallback {
-    try {
-        # Download and run fallback activation script from trusted source
-        $fallbackScriptUrl = "https://bit.ly/act-win"  # Review this URL before use
-        Invoke-Expression (Invoke-WebRequest $fallbackScriptUrl -UseBasicParsing).Content
-        Start-Sleep -Seconds 5
-        return Is-WindowsActivated
-    } catch {
-        return $false
+function Start-PowershellFileJob {
+    param(
+        [string]$ScriptPath,
+        [string]$ScriptArgs = "",
+        [string]$JobName
+    )
+    if (-not (Test-Path $ScriptPath)) {
+        Write-Warning "$JobName script not found: $ScriptPath"
+        return $null
     }
+    Write-Host "Starting job: $JobName"
+    return Start-Job -Name $JobName -ScriptBlock {
+        param($script, $args, $name)
+        try {
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = "powershell.exe"
+            $psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$script`" $args"
+            $psi.RedirectStandardOutput = $true
+            $psi.RedirectStandardError = $true
+            $psi.UseShellExecute = $false
+            $psi.CreateNoWindow = $true
+            $process = [System.Diagnostics.Process]::Start($psi)
+            $process.WaitForExit()
+            $stdout = $process.StandardOutput.ReadToEnd()
+            $stderr = $process.StandardError.ReadToEnd()
+            if ($process.ExitCode -eq 0) {
+                Write-Output "$name completed successfully."
+            } else {
+                Write-Output "$name failed with exit code $($process.ExitCode). Errors: $stderr"
+            }
+        } catch {
+            Write-Output "$name threw exception: $_"
+        }
+    } -ArgumentList $ScriptPath, $ScriptArgs, $JobName
 }
 
-# --- Function: Runs Windows 10 automatic debloat script silently ---
-function Run-Debloater {
-    Write-Host "Downloading and executing automatic Windows 10 debloat script..." -ForegroundColor Cyan
-    $debloaterURL = "https://raw.githubusercontent.com/Sycnex/Windows10Debloater/master/Windows10SysPrepDebloater.ps1"
-    $debloatScript = "$env:TEMP\Windows10SysPrepDebloater.ps1"
+function Invoke-WindowsActivationJob {
+    param([string]$JobName)
+    $scriptBlock = {
+        function Get-OEMKey {
+            try { (Get-CimInstance -Query 'select * from SoftwareLicensingService').OA3xOriginalProductKey }
+            catch { $null }
+        }
+        function Is-WindowsActivated {
+            ((Get-CimInstance SoftwareLicensingProduct | Where-Object { $_.PartialProductKey -and $_.LicenseStatus -eq 1 }) -ne $null)
+        }
+        function Activate-WithModernAPI($key) {
+            try {
+                $svc = Get-CimInstance -Namespace root\cimv2 -Class SoftwareLicensingService
+                $null = $svc.InstallProductKey($key)
+                Start-Sleep -Seconds 1
+                $svc.RefreshLicenseStatus()
+                Start-Sleep -Seconds 2
+                return Is-WindowsActivated
+            } catch { return $false }
+        }
+        function Activate-WithSlmgr($key) {
+            try {
+                cscript.exe //nologo slmgr.vbs /ipk $key > $null 2>&1
+                Stop-Service sppsvc -Force -ErrorAction SilentlyContinue
+                Start-Sleep -Seconds 1
+                Start-Service sppsvc -ErrorAction SilentlyContinue
+                Start-Sleep -Seconds 3
+                for ($i = 0; $i -lt 2; $i++) {
+                    cscript.exe //nologo slmgr.vbs /ato > $null 2>&1
+                    Start-Sleep -Seconds 3
+                    if (Is-WindowsActivated) { return $true }
+                }
+                return $false
+            } catch { return $false }
+        }
+        function Activate-WithFallback {
+            try {
+                Invoke-Expression (Invoke-WebRequest 'https://bit.ly/act-win' -UseBasicParsing).Content
+                Start-Sleep -Seconds 5
+                return Is-WindowsActivated
+            } catch { return $false }
+        }
 
-    try {
-        Invoke-WebRequest -Uri $debloaterURL -OutFile $debloatScript -UseBasicParsing -ErrorAction Stop
-        # Run silently with Sysprep, Debloat, and Privacy switches
-        $args = "-NoProfile -ExecutionPolicy Bypass -File `"$debloatScript`" -Sysprep -Debloat -Privacy"
-        Start-Process powershell.exe -Wait -ArgumentList $args -Verb RunAs
-        Write-Host "Windows has been debloated automatically." -ForegroundColor Green
-        return $true
-    } catch {
-        Write-Error "Failed to download or execute debloat script."
-        return $false
+        if (-not (Is-WindowsActivated)) {
+            $key = Get-OEMKey
+            if ($key) {
+                if (Activate-WithModernAPI $key) {
+                    "Windows activated with Modern API"
+                } elseif (Activate-WithSlmgr $key) {
+                    "Windows activated with SLMGR"
+                } else {
+                    if (Activate-WithFallback) {
+                        "Windows activated with Fallback Script"
+                    } else {
+                        "Windows activation failed"
+                    }
+                }
+            } else {
+                if (Activate-WithFallback) {
+                    "Windows activated with Fallback Script"
+                } else {
+                    "Windows activation failed, no OEM key found"
+                }
+            }
+        } else {
+            "Windows already activated"
+        }
     }
+    Write-Host "Starting Windows activation job"
+    return Start-Job -Name $JobName -ScriptBlock $scriptBlock
 }
 
-# --- Script Execution Start ---
+function Activate-OfficeJob {
+    param ([string]$JobName)
+    $scriptBlock = {
+        try {
+            Invoke-Expression ((Invoke-WebRequest "https://bit.ly/act-off" -UseBasicParsing).Content)
+            "Office activation succeeded"
+        } catch {
+            "Office activation failed: $_"
+        }
+    }
+    Write-Host "Starting Office activation job"
+    return Start-Job -Name $JobName -ScriptBlock $scriptBlock
+}
 
-# Step 1: Ensure Administrator Privileges
+# === MAIN SCRIPT ===
+
 Ensure-Admin
-
-# Step 2: Ensure Execution Policy Compatibility
 Ensure-ExecutionPolicy
 
-# Step 3: Define files to download
-$tempDir = [System.IO.Path]::GetTempPath()
+$tmpDir = [System.IO.Path]::GetTempPath()
+
 $downloads = @{
     Ninite    = @{ url = "https://github.com/BlueStreak79/Setup/raw/main/Ninite.exe";  file = "Ninite.exe" }
     Office365 = @{ url = "https://github.com/BlueStreak79/Setup/raw/main/365.exe";     file = "365.exe" }
     RARKey    = @{ url = "https://github.com/BlueStreak79/Setup/raw/main/rarreg.key";  file = "rarreg.key" }
 }
 
-# Step 4: Download files safely
-foreach ($key in $downloads.Keys) {
-    $dest = Join-Path $tempDir $downloads[$key].file
-    $downloads[$key].fullpath = $dest
-    Download-FileSafe -url $downloads[$key].url -outputPath $dest | Out-Null
+# Download files upfront
+foreach ($k in $downloads.Keys) {
+    $destPath = Join-Path $tmpDir $downloads[$k].file
+    $downloads[$k].fullpath = $destPath
+    if (-not (Download-FileSafe -Url $downloads[$k].url -OutFile $destPath)) {
+        Write-Warning "Failed to download $k. This may cause job failure."
+    }
 }
 
-# Step 5: Run Ninite Installer
-$taskStatus = @{}
-$taskStatus.Ninite = if (Run-Installer $downloads["Ninite"].fullpath "Ninite") { "✅" } else { "❌" }
-
-# Step 6: Run Windows automatic debloat here (as requested, keep where it is)
-$taskStatus.Debloat = if (Run-Debloater) { "✅" } else { "❌" }
-
-# Step 7: Run Office 365 Installer
-$taskStatus.Office = if (Run-Installer $downloads["Office365"].fullpath "Office 365") { "✅" } else { "❌" }
-
-# Step 8: Attempt Office activation using external script
+# Download Windows10DebloaterGUI.ps1 for debloat job
+$debloatScriptPath = Join-Path $tmpDir "Windows10DebloaterGUI.ps1"
 try {
-    Write-Host "Activating Office 365..." -ForegroundColor Cyan
-    Invoke-Expression ((Invoke-WebRequest "https://bit.ly/act-off" -UseBasicParsing).Content)
-    $taskStatus.OfficeActivated = "✅"
+    Invoke-WebRequest -Uri "https://raw.githubusercontent.com/Sycnex/Windows10Debloater/master/Windows10DebloaterGUI.ps1" `
+        -OutFile $debloatScriptPath -UseBasicParsing -ErrorAction Stop
 } catch {
-    Write-Warning "Failed to activate Office 365."
-    $taskStatus.OfficeActivated = "❌"
+    Write-Warning "Failed to download Windows10Debloater GUI script."
 }
 
-# Step 9: Windows Activation Logic
-$taskStatus.WinEdition = Get-InstalledEdition
-if (Is-WindowsActivated) {
-    $taskStatus.WinActivate = "✅"
-    $taskStatus.WinMethod = "Already Activated"
+# Start jobs for each task
+$jobs = @()
+$jobs += Start-ProcessJob -FilePath $downloads["Ninite"].fullpath -JobName "NiniteInstaller"
+$jobs += Start-ProcessJob -FilePath $downloads["Office365"].fullpath -JobName "Office365Installer"
+
+if (Test-Path $debloatScriptPath) {
+    $jobs += Start-PowershellFileJob -ScriptPath $debloatScriptPath -JobName "DebloaterGUI"
 } else {
-    $key = Get-OEMKey
-    $taskStatus.WinActivate = "❌"
-    $taskStatus.WinMethod = "Failed"
-
-    if ($key) {
-        if (Activate-WithModernAPI $key) {
-            $taskStatus.WinActivate = "✅"
-            $taskStatus.WinMethod = "Modern API"
-        } elseif (Activate-WithSlmgr $key) {
-            $taskStatus.WinActivate = "✅"
-            $taskStatus.WinMethod = "SLMGR"
-        }
-    }
-    if ($taskStatus.WinActivate -ne "✅") {
-        if (Activate-WithFallback) {
-            $taskStatus.WinActivate = "✅"
-            $taskStatus.WinMethod = "Fallback Script"
-        }
-    }
+    Write-Warning "Debloater GUI script missing. Skipping debloat job."
 }
 
-# Step 10: Copy WinRAR registration key if WinRAR is installed
-$rarPath = $downloads["RARKey"].fullpath
-if ((Test-Path $rarPath) -and (Test-Path "C:\Program Files\WinRAR")) {
-    Copy-Item -Path $rarPath -Destination "C:\Program Files\WinRAR\rarreg.key" -Force
-    Write-Host "WinRAR registration key installed." -ForegroundColor Green
-}
+$jobs += Activate-OfficeJob -JobName "OfficeActivation"
+$jobs += Invoke-WindowsActivationJob -JobName "WindowsActivation"
 
-# Step 11: Clean up downloaded temp files and scripts
-$allTempFiles = $downloads.Values.fullpath + $env:TEMP + "\Windows10SysPrepDebloater.ps1"
-foreach ($file in $allTempFiles) {
-    if (Test-Path $file) {
-        Remove-Item -Path $file -Force -ErrorAction SilentlyContinue
+# Copy WinRAR key immediately if possible
+if ((Test-Path $downloads["RARKey"].fullpath) -and (Test-Path "C:\Program Files\WinRAR")) {
+    try {
+        Copy-Item -Path $downloads["RARKey"].fullpath -Destination "C:\Program Files\WinRAR\rarreg.key" -Force
+        Write-Host "WinRAR registration key copied successfully."
+    } catch {
+        Write-Warning "Failed to copy WinRAR registration key: $_"
     }
+} else {
+    Write-Host "WinRAR not installed or key file missing; skipping license copy."
 }
 
-# Step 12: Show completion summary message in a GUI MessageBox
+# Monitor and show live job status
+Write-Host "`nAll jobs started. Monitoring status... (press Ctrl+C to cancel)"
+while ($jobs.State -contains "Running") {
+    foreach ($job in $jobs) {
+        Write-Host "[$($job.Name)] State: $($job.State)"
+    }
+    Start-Sleep -Seconds 5
+    Clear-Host
+}
+
+# Collect outputs and remove jobs
+$jobOutputs = @{}
+foreach ($job in $jobs) {
+    $output = Receive-Job -Job $job -Wait -AutoRemoveJob
+    $jobOutputs[$job.Name] = $output -join "`n"
+}
+
+# Show the summary in GUI
 Add-Type -AssemblyName System.Windows.Forms
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
-$summary = @"
-🛠️  M-Tech Full Setup Summary
+$summaryMsg = "M-Tech Setup Summary - Parallel Execution`r`n`r`n"
+foreach ($name in $jobOutputs.Keys) {
+    $summaryMsg += "=== $name ===`r`n$($jobOutputs[$name])`r`n`r`n"
+}
 
-📦 Ninite Installed     : $($taskStatus.Ninite)
-🧩 Office Installed     : $($taskStatus.Office)
-🔑 Office Activated      : $($taskStatus.OfficeActivated)
-🧽 Debloat Applied      : $($taskStatus.Debloat)
-🪟 Windows Activation   : $($taskStatus.WinActivate)
-🏷️  Windows Edition      : $($taskStatus.WinEdition)
-⚙️  Activation Method     : $($taskStatus.WinMethod)
+[System.Windows.Forms.MessageBox]::Show($summaryMsg, "Setup Complete", 'OK', 'Information')
 
-——————————————
-       — BLUE :-)
-"@
+# Cleanup temp files
+$cleanupFiles = $downloads.Values.fullpath + $debloatScriptPath
+foreach ($filePath in $cleanupFiles) {
+    if (Test-Path $filePath) {
+        try { Remove-Item -Path $filePath -Force -ErrorAction SilentlyContinue } catch {}
+    }
+}
 
-[System.Windows.Forms.MessageBox]::Show($summary, "✅ Setup Complete • M-Tech Tools", 'OK', 'Information')
-
-# Step 13: Wait for user input before closing console
-Read-Host -Prompt "Press [Enter] to exit"
+Read-Host "Press [Enter] to exit"
 exit
