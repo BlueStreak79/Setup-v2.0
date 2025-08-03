@@ -1,25 +1,26 @@
 <#
 .SYNOPSIS
-    Parallel Windows setup automation with status monitoring and summary.
+    Parallel Windows setup automation with visible installer windows, live status monitoring, and final summary.
 
 .DESCRIPTION
     - Runs Ninite and Office 365 installers, Windows10Debloater GUI, and Windows activation as background jobs.
-    - Downloads all required files before launching jobs.
-    - Periodically outputs job status until all jobs finish.
-    - Upon completion, collects job outputs and shows results in a GUI message box.
-    - Copies WinRAR registration key if present.
-    - Cleans temp files created during execution.
+    - All installers and GUI open visible windows for user interaction immediately.
+    - Downloads all needed files ahead of job starts.
+    - Monitors job status every 5 seconds.
+    - Shows a final GUI summary after all jobs are complete.
+    - Copies WinRAR license key if present.
+    - Cleans up temporary files after completion.
 
 .NOTES
     - Run this script as Administrator.
-    - Verify all URLs and scripts before running.
+    - Verify all URLs and content before running.
 #>
 
 function Ensure-Admin {
     $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent())
         .IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
     if (-not $isAdmin) {
-        Write-Warning "Script needs to run as Administrator. Restarting..."
+        Write-Warning "Script requires Administrator. Restarting as Admin..."
         Start-Process powershell.exe "-ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
         exit
     }
@@ -43,7 +44,7 @@ function Download-FileSafe {
         Write-Host "Downloaded to $OutFile"
         return $true
     } catch {
-        Write-Warning "Download failed initially, retrying in 2 seconds..."
+        Write-Warning "First download attempt failed, retrying in 2 seconds..."
         Start-Sleep -Seconds 2
         try {
             Invoke-WebRequest -Uri $Url -OutFile $OutFile -TimeoutSec $TimeoutSec -UseBasicParsing -ErrorAction Stop
@@ -70,7 +71,7 @@ function Start-ProcessJob {
     return Start-Job -Name $JobName -ScriptBlock {
         param($file, $args, $name)
         try {
-            Start-Process -FilePath $file -ArgumentList $args -Wait -NoNewWindow -ErrorAction Stop
+            Start-Process -FilePath $file -ArgumentList $args -Wait -WindowStyle Normal -ErrorAction Stop
             Write-Output "$name completed successfully."
         } catch {
             Write-Output "$name failed with error: $_"
@@ -98,7 +99,7 @@ function Start-PowershellFileJob {
             $psi.RedirectStandardOutput = $true
             $psi.RedirectStandardError = $true
             $psi.UseShellExecute = $false
-            $psi.CreateNoWindow = $true
+            $psi.CreateNoWindow = $false  # <-- SHOW WINDOW for user interaction
             $process = [System.Diagnostics.Process]::Start($psi)
             $process.WaitForExit()
             $stdout = $process.StandardOutput.ReadToEnd()
@@ -231,7 +232,7 @@ try {
     Write-Warning "Failed to download Windows10Debloater GUI script."
 }
 
-# Start jobs for each task
+# Launch jobs for all main tasks immediately with visible windows
 $jobs = @()
 $jobs += Start-ProcessJob -FilePath $downloads["Ninite"].fullpath -JobName "NiniteInstaller"
 $jobs += Start-ProcessJob -FilePath $downloads["Office365"].fullpath -JobName "Office365Installer"
@@ -257,8 +258,8 @@ if ((Test-Path $downloads["RARKey"].fullpath) -and (Test-Path "C:\Program Files\
     Write-Host "WinRAR not installed or key file missing; skipping license copy."
 }
 
-# Monitor and show live job status
-Write-Host "`nAll jobs started. Monitoring status... (press Ctrl+C to cancel)"
+# Monitor and display live job status every 5 seconds
+Write-Host "`nAll jobs launched. Monitoring status... (press Ctrl+C to stop monitoring)"
 while ($jobs.State -contains "Running") {
     foreach ($job in $jobs) {
         Write-Host "[$($job.Name)] State: $($job.State)"
@@ -267,14 +268,14 @@ while ($jobs.State -contains "Running") {
     Clear-Host
 }
 
-# Collect outputs and remove jobs
+# Retrieve job outputs for summary and remove jobs
 $jobOutputs = @{}
 foreach ($job in $jobs) {
     $output = Receive-Job -Job $job -Wait -AutoRemoveJob
     $jobOutputs[$job.Name] = $output -join "`n"
 }
 
-# Show the summary in GUI
+# Show final summary GUI message box
 Add-Type -AssemblyName System.Windows.Forms
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
