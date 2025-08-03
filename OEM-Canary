@@ -1,34 +1,34 @@
+# Ensure running as admin and set execution policy
+if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
+    $params = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
+    Start-Process powershell.exe $params -Verb RunAs
+    exit
+}
+
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+
 Add-Type -AssemblyName PresentationFramework
 
-function Show-Popup($title, $message) {
-    [System.Windows.MessageBox]::Show($message, $title)
+function Show-Popup($title, $msg) {
+    [System.Windows.MessageBox]::Show($msg, $title)
 }
 
 function Is-Activated {
-    $products = Get-CimInstance -ClassName SoftwareLicensingProduct | Where-Object { $_.Description -like "Windows*" -and $_.LicenseStatus -eq 1 }
-    return $products.Count -gt 0
+    $p = Get-CimInstance -ClassName SoftwareLicensingProduct | Where-Object { $_.Description -like "Windows*" -and $_.LicenseStatus -eq 1 }
+    return $p.Count -gt 0
 }
 
 function Get-OEMKey {
-    try {
-        $svc = Get-CimInstance -ClassName SoftwareLicensingService
-        return $svc.OA3xOriginalProductKey
-    } catch { return $null }
+    try { (Get-CimInstance -ClassName SoftwareLicensingService).OA3xOriginalProductKey } catch { $null }
 }
 
 function Get-ActivatedKey {
-    $products = Get-CimInstance -ClassName SoftwareLicensingProduct | Where-Object { $_.Description -like "Windows*" -and $_.LicenseStatus -eq 1 }
-    return ($products | Select-Object -First 1).PartialProductKey
+    $p = Get-CimInstance -ClassName SoftwareLicensingProduct | Where-Object { $_.Description -like "Windows*" -and $_.LicenseStatus -eq 1 }
+    ($p | Select-Object -First 1).PartialProductKey
 }
 
 function Get-Edition {
     (Get-CimInstance -ClassName Win32_OperatingSystem).Caption
-}
-
-# Relaunch as Administrator if needed
-if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
-    Start-Process powershell.exe "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
-    exit
 }
 
 $edition = Get-Edition
@@ -85,7 +85,7 @@ if ($oemKey) {
     }
 } else {
     Write-Output "No OEM key, running Canary fallback."
-    # Uncomment and set your Canary script, if desired:
+    # If you want to use the Canary fallback, uncomment:
     # iex (irm 'https://raw.githubusercontent.com/BlueStreak79/Setup/refs/heads/main/run.ps1')
     $methodUsed = "Canary"
     $activated = Is-Activated
