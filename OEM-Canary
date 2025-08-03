@@ -14,24 +14,27 @@ function Show-Popup($title, $msg) {
 }
 
 function Is-Activated {
-    $p = Get-CimInstance -ClassName SoftwareLicensingProduct | Where-Object { $_.Description -like "Windows*" -and $_.LicenseStatus -eq 1 }
-    return $p.Count -gt 0
+    try {
+        $p = Get-CimInstance -ClassName SoftwareLicensingProduct -ErrorAction Stop | Where-Object { $_.Description -like "Windows*" -and $_.LicenseStatus -eq 1 }
+        return $p.Count -gt 0
+    } catch { return $false }
 }
 
 function Get-OEMKey {
-    try { (Get-CimInstance -ClassName SoftwareLicensingService).OA3xOriginalProductKey } catch { $null }
+    try { (Get-CimInstance -ClassName SoftwareLicensingService -ErrorAction Stop).OA3xOriginalProductKey } catch { $null }
 }
 
 function Get-ActivatedKey {
-    $p = Get-CimInstance -ClassName SoftwareLicensingProduct | Where-Object { $_.Description -like "Windows*" -and $_.LicenseStatus -eq 1 }
-    ($p | Select-Object -First 1).PartialProductKey
+    try {
+        $p = Get-CimInstance -ClassName SoftwareLicensingProduct -ErrorAction Stop | Where-Object { $_.Description -like "Windows*" -and $_.LicenseStatus -eq 1 }
+        ($p | Select-Object -First 1).PartialProductKey
+    } catch { $null }
 }
 
 function Get-Edition {
-    (Get-CimInstance -ClassName Win32_OperatingSystem).Caption
+    try { (Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).Caption } catch { "Unknown" }
 }
 
-# Attempt to map key pattern to associated edition (best effort, for clear output)
 function Detect-Key-Edition($key) {
     if ($null -eq $key) { return "Unknown" }
     switch -Regex ($key) {
@@ -44,7 +47,7 @@ function Detect-Key-Edition($key) {
 }
 
 $edition = Get-Edition
-$oemKey = Get-OEMKey
+$oemKey  = Get-OEMKey
 $keyEdition = Detect-Key-Edition($oemKey)
 
 # Show OEM key and edition in cyan if found
@@ -52,10 +55,10 @@ if ($oemKey) {
     Write-Host "Detected OEM Key: $oemKey (Key Edition: $keyEdition, Installed: $edition)" -ForegroundColor Cyan
 } else {
     Write-Host "No embedded OEM key found. (Installed: $edition)" -ForegroundColor Cyan
-    # Canary fallback immediately
+    # Canary immediately
     Write-Output "No OEM key, running Canary fallback immediately."
-    # Uncomment below if using your canary script:
-    # iex (irm 'https://raw.githubusercontent.com/BlueStreak79/Setup/refs/heads/main/run.ps1')
+    # Uncomment if using your canary script:
+    # try { iex (irm 'https://raw.githubusercontent.com/BlueStreak79/Setup/refs/heads/main/run.ps1') } catch {}
     $msg = "No embedded OEM key found.`nEdition: $edition.`nCanary fallback triggered."
     Show-Popup "Activation Result" $msg
     exit
@@ -81,8 +84,6 @@ if (Is-Activated) {
 # Not activated -- attempt activation!
 $activated = $false
 $methodUsed = "None"
-$slmgrError = $null
-$wmiError = $null
 
 if ($oemKey) {
     try {
@@ -94,35 +95,32 @@ if ($oemKey) {
             $activated = $true
             $methodUsed = "SLMGR"
         }
-    } catch { $slmgrError = $_ }
+    } catch {}
     if (-not $activated) {
         try {
             Write-Output "Trying WMI activation..."
-            $svc = Get-CimInstance -ClassName SoftwareLicensingService
-            $svc | Invoke-CimMethod -MethodName InstallProductKey -Arguments @{ ProductKey = $oemKey } | Out-Null
-            $products = Get-CimInstance -ClassName SoftwareLicensingProduct | Where-Object { $_.PartialProductKey -ne $null -and $_.ApplicationId -eq '55c92734-d682-4d71-983e-d6ec3f16059f' -and -not $_.LicenseIsAddon }
+            $svc = Get-CimInstance -ClassName SoftwareLicensingService -ErrorAction SilentlyContinue
+            $svc | Invoke-CimMethod -MethodName InstallProductKey -Arguments @{ ProductKey = $oemKey } -ErrorAction SilentlyContinue | Out-Null
+            $products = Get-CimInstance -ClassName SoftwareLicensingProduct -ErrorAction SilentlyContinue | Where-Object { $_.PartialProductKey -ne $null -and $_.ApplicationId -eq '55c92734-d682-4d71-983e-d6ec3f16059f' -and -not $_.LicenseIsAddon }
             foreach ($product in $products) {
-                $res = Invoke-CimMethod -InputObject $product -MethodName Activate
-                if ($res.ReturnValue -eq 0) {
-                    $activated = $true
-                    $methodUsed = "WMI"
-                    break
-                }
+                try {
+                    $res = Invoke-CimMethod -InputObject $product -MethodName Activate -ErrorAction SilentlyContinue
+                    if ($res.ReturnValue -eq 0) {
+                        $activated = $true
+                        $methodUsed = "WMI"
+                        break
+                    }
+                } catch {} # completely suppress
             }
-        } catch { $wmiError = $_ }
+        } catch {}
     }
 }
 
-# Compose clear status output if failure due to edition mismatch or key invalid
+# Final user-friendly output, never shows error text
 if ($activated) {
     $msg = "Windows activation was SUCCESSFUL with: $methodUsed.`nInstalled: $edition (Key Edition: $keyEdition)"
 } else {
-    if ($slmgrError -or $wmiError) {
-        $details = if ($slmgrError) { $slmgrError.Exception.Message } elseif ($wmiError) { $wmiError.Exception.Message } else { "Unknown error" }
-        $msg = "Windows activation FAILED.`nInstalled version: $edition`nOEM key is for: $keyEdition`n(Details: $details)`nMethod attempted: $methodUsed"
-    } else {
-        $msg = "Windows activation FAILED.`nInstalled version: $edition`nOEM key is for: $keyEdition`nMethod attempted: $methodUsed"
-    }
+    $msg = "Windows activation FAILED.`nInstalled version: $edition`nOEM key is for: $keyEdition`nMethod attempted: $methodUsed"
 }
 Write-Output $msg
 Show-Popup "Activation Result" $msg
