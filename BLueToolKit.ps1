@@ -31,11 +31,17 @@ $script:Config = @{
             'Microsoft.MicrosoftSolitaireCollection', 'Microsoft.WindowsFeedbackHub', 'Microsoft.People',
             'Microsoft.MicrosoftOfficeHub', 'Clipchamp.Clipchamp'
         )
-        url = ''; sha256 = ''     # optional extra debloat script you have reviewed (pin a hash)
+        url = 'https://raw.githubusercontent.com/Sycnex/Windows10Debloater/master/Windows10DebloaterGUI.ps1'
+        sha256 = ''    # pin this once you've reviewed the script at that URL
+        guiMode = $true  # this script opens a WPF window and needs you to click through it, so its
+                         # process window is NOT hidden and full-setup waits for you to close it
     }
 
-    winrar = @{ keyPath = '' }    # path to a WinRAR key file you supply; nothing is bundled
-    winget = @{ packages = @() }  # e.g. @('7zip.7zip', 'VideoLAN.VLC')
+    # keyUrl is downloaded fresh each run; keyPath instead uses a local file you already have.
+    # The key is applied only once WinRAR.exe is found on disk, however it was installed.
+    winrar = @{ keyUrl = 'https://github.com/BlueStreak79/Setup/raw/refs/heads/main/rarreg.key'; keyPath = ''; sha256 = '' }
+
+    winget = @{ packages = @('RARLab.WinRAR', 'VideoLAN.VLC', '7zip.7zip', 'Google.Chrome') }
 
     settings = @{
         timezone = 'India Standard Time'
@@ -236,15 +242,17 @@ function Invoke-FullSetup {
     elseif (-not $r.KeyFound)   { Add-StepResult 'OEM activation' 'Skipped' $r.Message }
     else                        { Add-StepResult 'OEM activation' 'Failed' $r.Message }
 
-    # 4. WinRAR key must wait for Ninite (which installs WinRAR)
+    # 4. Try the WinRAR key once Ninite is done (it may have installed WinRAR already)
     Wait-ToolkitHandles -Handles @($ninite)
     Register-WinRARKey
 
     # 5. Everything else
     Wait-ToolkitHandles -Handles @($office, $debloat)
 
-    # 6. winget packages after the installers finish (avoids installer-mutex clashes)
+    # 6. winget packages after the installers finish (avoids installer-mutex clashes).
+    #    WinRAR is in the default winget list, so check the key again in case it installed WinRAR here instead.
     Install-WingetPackages -Ids @($cfg.winget.packages)
+    Register-WinRARKey -Final
 
     Invoke-ToolkitHooks -Stage 'PostSetup'
     Clear-ToolkitWork
@@ -347,17 +355,20 @@ function Start-AssetInstaller {
 }
 
 function Start-DebloatScript {
-    <# Downloads the script named in config.json (debloat.url) and runs it hidden in its own PowerShell.
-       Left blank by default: pin a real URL + SHA256 you have reviewed instead of a short link. #>
+    <# Downloads the script named in debloat.url and runs it in its own PowerShell.
+       Set debloat.guiMode = $true (the default here) for a script that opens its own window and needs
+       you to click through it - full-setup will wait for you to close it before moving on. #>
     $cfg = (Get-ToolkitConfig).debloat
-    if (-not $cfg -or -not $cfg.url) { Add-StepResult 'Debloat' 'Skipped' 'No URL in config.json (debloat.url)'; return $null }
+    if (-not $cfg -or -not $cfg.url) { Add-StepResult 'Debloat' 'Skipped' 'No URL set (debloat.url)'; return $null }
 
     $out = Join-Path $script:WorkDir 'debloat.ps1'
     if (-not (Save-VerifiedDownload -Url $cfg.url -OutFile $out -Sha256 $cfg.sha256 -MaxMB 5)) {
         Add-StepResult 'Debloat' 'Failed' 'Download failed'
         return $null
     }
-    $p = Start-Process powershell.exe -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', ('"{0}"' -f $out)) -PassThru
+    $winStyle = if ($cfg.guiMode) { 'Normal' } else { 'Hidden' }
+    if ($cfg.guiMode) { Write-Log 'Debloat script opens its own window - close it when you are done to continue.' 'WARN' }
+    $p = Start-Process powershell.exe -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', $winStyle, '-File', ('"{0}"' -f $out)) -PassThru
     [pscustomobject]@{ Label = 'Debloat'; Process = $p; File = $out }
 }
 
@@ -372,16 +383,41 @@ function Wait-ToolkitHandles {
     }
 }
 
+$script:WinRARKeyApplied = $false
+
 function Register-WinRARKey {
-    <# Copies a key file YOU supply (config.json: winrar.keyPath) into the WinRAR folder. Nothing is bundled. #>
-    $path = (Get-ToolkitConfig).winrar.keyPath
-    if (-not $path) { Add-StepResult 'WinRAR key' 'Skipped' 'winrar.keyPath is empty'; return }
-    if (-not (Test-Path $path)) { Add-StepResult 'WinRAR key' 'Failed' "key file not found: $path"; return }
+    <# Applies the WinRAR key only once WinRAR.exe is actually found on disk - whether Ninite or winget
+       installed it. Safe to call more than once (e.g. once after Ninite, again after winget packages):
+       it does nothing once the key is already applied, and -Final controls whether a "still not
+       installed" result is reported (so you only see one summary line, from the last call). #>
+    param([switch]$Final)
+
+    if ($script:WinRARKeyApplied) { return }
 
     $dir = Join-Path $env:ProgramFiles 'WinRAR'
-    if (-not (Test-Path (Join-Path $dir 'WinRAR.exe'))) { Add-StepResult 'WinRAR key' 'Skipped' 'WinRAR is not installed'; return }
+    if (-not (Test-Path (Join-Path $dir 'WinRAR.exe'))) {
+        if ($Final) { Add-StepResult 'WinRAR key' 'Skipped' 'WinRAR was never installed' }
+        return
+    }
 
-    Copy-Item -Path $path -Destination (Join-Path $dir 'rarreg.key') -Force
+    $cfg = (Get-ToolkitConfig).winrar
+    $src = $null
+    if ($cfg.keyUrl) {
+        $src = Join-Path $script:WorkDir 'rarreg.key'
+        if (-not (Save-VerifiedDownload -Url $cfg.keyUrl -OutFile $src -Sha256 $cfg.sha256 -MaxMB 1)) {
+            Add-StepResult 'WinRAR key' 'Failed' 'Download failed'
+            return
+        }
+    } elseif ($cfg.keyPath) {
+        if (-not (Test-Path $cfg.keyPath)) { Add-StepResult 'WinRAR key' 'Failed' "key file not found: $($cfg.keyPath)"; return }
+        $src = $cfg.keyPath
+    } else {
+        if ($Final) { Add-StepResult 'WinRAR key' 'Skipped' 'No winrar.keyUrl or winrar.keyPath set' }
+        return
+    }
+
+    Copy-Item -Path $src -Destination (Join-Path $dir 'rarreg.key') -Force
+    $script:WinRARKeyApplied = $true
     Add-StepResult 'WinRAR key' 'OK'
 }
 
@@ -392,7 +428,7 @@ function Clear-ToolkitWork {
 Register-ToolkitTask -Key 'apps' -Name 'Apps: Ninite + Office installer (parallel), then WinRAR key' -Action {
     $h = @((Start-AssetInstaller -Key 'ninite' -Label 'Ninite'), (Start-AssetInstaller -Key 'office' -Label 'Office installer')) | Where-Object { $_ }
     Wait-ToolkitHandles -Handles $h
-    Register-WinRARKey
+    Register-WinRARKey -Final
     Clear-ToolkitWork
 }
 #endregion
